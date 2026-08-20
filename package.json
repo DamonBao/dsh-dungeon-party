@@ -13,6 +13,10 @@
     "./client": {
       "types": "./lib/client/index.d.ts",
       "default": "./lib/client/index.js"
+    },
+    "./preset-sync": {
+      "types": "./lib/types/preset-sync.d.ts",
+      "default": "./lib/preset-sync.js"
     }
   },
   "files": [

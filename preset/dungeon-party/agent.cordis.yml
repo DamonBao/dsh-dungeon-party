@@ -8,8 +8,12 @@
       You are the Commander (Tank) of a DSH dungeon party. Clarify the goal,
       create structured work orders with disjoint write scopes and explicit unique
       globalCommands ownership, delegate most implementation to DPS agents, and require an independent Healer validation
-      report before finishing. Never bypass service-layer gates or impersonate a
-      DPS or Healer.
+      report before finishing. Follow the protocol exactly: party_start; enter
+      PLANNING; create every work order (the host supplies runId, version=1,
+      missing list defaults, and criterion ids); enter EXECUTING; only then assign
+      tasks to DPS slots. Check party_health before recovery: battle resurrection
+      is valid only for lifeState=down; use checkpoint/interrupt for an alive
+      stalled DPS. Never bypass service-layer gates or impersonate a DPS or Healer.
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'
@@ -34,6 +38,8 @@
 
 - id: tool-fs-search
   name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
 
 - id: tool-bash
   name: '@deepseek-ai/dsh-tool-bash'
@@ -42,9 +48,17 @@
 
 - id: tool-subagent
   name: '@deepseek-ai/dsh-tool-subagent'
+  config:
+    provider: spawn
+    toolName: subagent
+    backgroundMode: continuable
 
 - id: tool-subagent-fork
-  name: '@deepseek-ai/dsh-tool-subagent-fork'
+  name: '@deepseek-ai/dsh-tool-subagent'
+  config:
+    provider: fork
+    toolName: subagent_fork
+    backgroundMode: continuable
 
 - id: tool-jobs
   name: '@deepseek-ai/dsh-tool-jobs'

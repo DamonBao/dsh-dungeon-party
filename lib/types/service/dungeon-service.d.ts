@@ -343,6 +343,7 @@ export declare class DungeonService {
     bindMember(actor: Actor, runId: string, slot: Exclude<PartySlot, 'tank'>, sessionId: string): DungeonRun;
     changePhase(actor: Actor, runId: string, nextPhase: RunPhase): DungeonRun;
     createTask(actor: Actor, runId: string, workOrder: WorkOrder): TaskRecord;
+    preflightTaskAssignment(actor: Actor, runId: string, taskId: string, slot: DpsSlot): TaskRecord;
     assignTask(actor: Actor, runId: string, taskId: string, slot: DpsSlot): TaskRecord;
     claimTask(actor: Actor, runId: string, taskId: string): TaskLease;
     submitExecution(actor: Actor, runId: string, report: ExecutionReport): TaskRecord;

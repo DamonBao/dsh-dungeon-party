@@ -734,15 +734,26 @@ export class DungeonService {
     return clone(run.tasks[workOrder.id]!)
   }
 
-  assignTask(actor: Actor, runId: string, taskId: string, slot: DpsSlot): TaskRecord {
+  preflightTaskAssignment(actor: Actor, runId: string, taskId: string, slot: DpsSlot): TaskRecord {
     const run = this.requireTank(actor, runId)
-    assert(run.phase === 'EXECUTING' || run.phase === 'REPAIR', 'INVALID_PHASE', 'Tasks can only be assigned during execution or repair')
-    assert(run.slots[slot].currentSessionId, 'UNBOUND_SLOT', `Slot ${slot} is not bound`)
+    assert(
+      run.phase === 'EXECUTING' || run.phase === 'REPAIR',
+      'INVALID_PHASE',
+      `Task assignment requires EXECUTING or REPAIR; current phase is ${run.phase}. Call party_phase with phase=EXECUTING after all work orders are created.`,
+    )
     const task = this.requireTask(run, taskId)
     if (task.ownerSlot === slot && task.status === 'ready') return clone(task)
     assert(['pending', 'ready'].includes(task.status) && !task.ownerSlot, 'TASK_NOT_ASSIGNABLE', `Task ${taskId} cannot be assigned`)
     const unmet = task.workOrder.blockedBy.filter((dependency) => run.tasks[dependency]?.status !== 'completed')
     assert(unmet.length === 0, 'UNMET_DEPENDENCY', `Task is blocked by ${unmet.join(', ')}`)
+    return clone(task)
+  }
+
+  assignTask(actor: Actor, runId: string, taskId: string, slot: DpsSlot): TaskRecord {
+    const task = this.preflightTaskAssignment(actor, runId, taskId, slot)
+    if (task.ownerSlot === slot && task.status === 'ready') return task
+    const run = this.requireRun(runId)
+    assert(run.slots[slot].currentSessionId, 'UNBOUND_SLOT', `Slot ${slot} is not bound`)
     this.append(run, 'dungeon/task-assigned', { taskId, ownerSlot: slot }, actor.sessionId)
     return clone(run.tasks[taskId]!)
   }
@@ -902,7 +913,11 @@ export class DungeonService {
     const existing = run.resurrectionRequests.find((request) => request.resurrectionId === resurrectionId)
     if (existing) return clone(existing)
     const binding = run.slots[slot]
-    assert(binding.currentSessionId && binding.lifeState === 'down', 'MEMBER_NOT_DOWN', 'DPS must be down before battle resurrection')
+    assert(
+      binding.currentSessionId && binding.lifeState === 'down',
+      'MEMBER_NOT_DOWN',
+      `Battle resurrection is only valid after runtime health evidence marks ${slot} down; current lifeState is ${binding.lifeState}. For a stalled but alive DPS, use party_request_checkpoint or party_interrupt instead.`,
+    )
     assert(run.battleResChargesRemaining > 0, 'NO_BATTLE_RES_CHARGES', 'No DPS battle resurrection charges remain')
     assert(binding.generation < this.config.maxGenerationsPerSlot, 'MAX_GENERATION_REACHED', 'DPS slot reached its maximum generation')
     const requestedAt = this.clock()

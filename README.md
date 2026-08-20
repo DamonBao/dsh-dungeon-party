@@ -22,6 +22,16 @@ DSH「五人本模式」插件，按固定的 1T、3DPS、1 奶逻辑队伍编�
 - Lease 过期与并发 DPS 门禁、全局命令单一归属、运行时 Turn/Agent 故障信号和自动战复通知；
 - 可选 Web 客户端副本浮层，通过 Lead Session 的 `dungeon-party` whole-value projection 展示阶段、队伍、任务、验收与战复摘要。
 
+## 安装
+
+```bash
+dsh plugin --profile web add dsh-dungeon-party
+```
+
+插件启动时会按 profile 机制将内置 `dungeon-party` 预设同步到
+`$DSH_HOME/.agent-presets/dungeon-party`。安装或升级后重启 DSH Web，
+然后在新建会话的预设选择器中选择「五人本模式」。
+
 运行测试：
 
 ```bash

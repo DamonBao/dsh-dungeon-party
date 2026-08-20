@@ -17,6 +17,21 @@ describe('dungeon-party agent preset', () => {
     ]))
   })
 
+  it('uses the current DSH tool schemas for search and subagents', async () => {
+    const composition = load(await readFile(new URL('agent.cordis.yml', presetRoot), 'utf8')) as Array<Record<string, unknown>>
+    expect(composition.find((row) => row.id === 'tool-fs-search')).toMatchObject({
+      config: { sampleOverCapGlobResults: false },
+    })
+    expect(composition.find((row) => row.id === 'tool-subagent')).toMatchObject({
+      name: '@deepseek-ai/dsh-tool-subagent',
+      config: { provider: 'spawn', toolName: 'subagent', backgroundMode: 'continuable' },
+    })
+    expect(composition.find((row) => row.id === 'tool-subagent-fork')).toMatchObject({
+      name: '@deepseek-ai/dsh-tool-subagent',
+      config: { provider: 'fork', toolName: 'subagent_fork', backgroundMode: 'continuable' },
+    })
+  })
+
   it('publishes the optional Web client overlay entry', async () => {
     const pkg = JSON.parse(await readFile(new URL('../../package.json', presetRoot), 'utf8')) as {
       exports: Record<string, unknown>

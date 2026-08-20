@@ -25,6 +25,61 @@ function json<T>(value: T): JsonValue {
   return JSON.parse(JSON.stringify(value)) as JsonValue
 }
 
+function stringList(value: unknown, field: string): string[] {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) {
+    throw new DungeonError('INVALID_ARGS', `${field} must be an array of strings`)
+  }
+  return value
+}
+
+function normalizeWorkOrderDraft(value: Record<string, unknown>, runId: string): WorkOrder {
+  const id = typeof value.id === 'string' ? value.id.trim() : ''
+  const title = typeof value.title === 'string' ? value.title.trim() : ''
+  const objective = typeof value.objective === 'string' ? value.objective.trim() : ''
+  if (!id || !title || !objective) throw new DungeonError('INVALID_ARGS', 'workOrder needs id, title, and objective')
+  if (!Array.isArray(value.acceptanceCriteria) || value.acceptanceCriteria.length === 0) {
+    throw new DungeonError('INVALID_ARGS', 'workOrder needs at least one acceptance criterion')
+  }
+  const acceptanceCriteria = value.acceptanceCriteria.map((criterion, index) => {
+    const record = typeof criterion === 'object' && criterion !== null && !Array.isArray(criterion)
+      ? criterion as Record<string, unknown>
+      : undefined
+    const description = typeof criterion === 'string'
+      ? criterion.trim()
+      : typeof record?.description === 'string' ? record.description.trim()
+        : typeof record?.criterion === 'string' ? record.criterion.trim()
+          : typeof record?.text === 'string' ? record.text.trim() : ''
+    if (!description) throw new DungeonError('INVALID_ARGS', `acceptanceCriteria[${index}] needs a description`)
+    return {
+      id: typeof record?.id === 'string' && record.id.trim() ? record.id.trim() : `${id}:criterion-${index + 1}`,
+      description,
+      required: typeof record?.required === 'boolean' ? record.required : true,
+    }
+  })
+  const priority = value.priority ?? 'normal'
+  if (!['critical', 'high', 'normal', 'low'].includes(String(priority))) {
+    throw new DungeonError('INVALID_ARGS', 'workOrder.priority must be critical, high, normal, or low')
+  }
+  return {
+    id,
+    runId,
+    title,
+    objective,
+    inputs: stringList(value.inputs, 'workOrder.inputs'),
+    constraints: stringList(value.constraints, 'workOrder.constraints'),
+    acceptanceCriteria,
+    readScopes: stringList(value.readScopes, 'workOrder.readScopes'),
+    writeScopes: stringList(value.writeScopes, 'workOrder.writeScopes'),
+    globalCommands: stringList(value.globalCommands, 'workOrder.globalCommands'),
+    blockedBy: stringList(value.blockedBy, 'workOrder.blockedBy'),
+    expectedArtifacts: stringList(value.expectedArtifacts, 'workOrder.expectedArtifacts'),
+    priority: priority as WorkOrder['priority'],
+    required: typeof value.required === 'boolean' ? value.required : true,
+    version: 1,
+  }
+}
+
 function currentTurnId(exec: ToolRunContext): string | undefined {
   const turn = exec.agent
     ? [...exec.agent.session.events].reverse().find((event) => event.type === 'turn/start')
@@ -104,7 +159,7 @@ export function registerDungeonTools(
     })),
     ctx.tools.register(defineTool({
       name: 'party_phase',
-      description: 'As tank, move the run to an allowed phase; entering execution activates the healer first.',
+      description: 'As tank, move the run through FORMING→PLANNING (create all work orders)→EXECUTING (then assign DPS)→VALIDATING; entering execution activates the healer first.',
       parameters: {
         runId: { type: 'string', required: true },
         phase: {
@@ -156,7 +211,7 @@ export function registerDungeonTools(
     })),
     ctx.tools.register(defineTool({
       name: 'party_assign',
-      description: 'As tank, create a structured work order or assign a ready task to a DPS slot.',
+      description: 'As tank, create a work order draft (runId/version/list defaults are host-normalized) or assign after party_phase enters EXECUTING/REPAIRING.',
       parameters: {
         runId: { type: 'string', required: true },
         action: { type: 'string', enum: ['create', 'assign'], required: true },
@@ -171,9 +226,24 @@ export function registerDungeonTools(
           if (!args.workOrder || typeof args.workOrder !== 'object' || Array.isArray(args.workOrder)) {
             throw new DungeonError('INVALID_ARGS', 'workOrder is required for create')
           }
-          return json(service.createTask(caller, args.runId, args.workOrder as unknown as WorkOrder))
+          return json(service.createTask(
+            caller,
+            args.runId,
+            normalizeWorkOrderDraft(args.workOrder as Record<string, unknown>, args.runId),
+          ))
         }
         if (!args.taskId || !args.slot) throw new DungeonError('INVALID_ARGS', 'taskId and slot are required for assign')
+        const run = service.getRunForActor(caller, args.runId)
+        if (run.phase !== 'EXECUTING' && run.phase !== 'REPAIR') {
+          return json({
+            ok: false,
+            code: 'INVALID_PHASE',
+            message: `Assignment is not available during ${run.phase}. Finish creating work orders, then enter EXECUTING.`,
+            currentPhase: run.phase,
+            recommendedAction: { tool: 'party_phase', runId: args.runId, phase: 'EXECUTING' },
+          })
+        }
+        service.preflightTaskAssignment(caller, args.runId, args.taskId, args.slot as DpsSlot)
         await agentManager?.ensureMember(caller, args.runId, args.slot as DpsSlot)
         const assigned = service.assignTask(caller, args.runId, args.taskId, args.slot as DpsSlot)
         agentManager?.dispatchTask(caller, args.runId, args.taskId)
@@ -287,7 +357,7 @@ export function registerDungeonTools(
     })),
     ctx.tools.register(defineTool({
       name: 'request_battle_res',
-      description: 'As tank, reserve one battle resurrection for a down DPS slot.',
+      description: 'As tank, reserve battle resurrection only when party_health reports the DPS lifeState=down; use checkpoint/interrupt for an alive stalled DPS.',
       parameters: {
         runId: { type: 'string', required: true },
         slot: { type: 'string', enum: ['dps-1', 'dps-2', 'dps-3'], required: true },
@@ -296,6 +366,17 @@ export function registerDungeonTools(
       output,
       async execute(args, exec) {
         const caller = actor(exec)
+        const run = service.getRunForActor(caller, args.runId)
+        const currentLifeState = run.slots[args.slot as DpsSlot].lifeState
+        if (currentLifeState !== 'down') {
+          return json({
+            ok: false,
+            code: 'MEMBER_NOT_DOWN',
+            message: `Battle resurrection requires lifeState=down; ${args.slot} is currently ${currentLifeState}.`,
+            currentLifeState,
+            recommendedTools: ['party_request_checkpoint', 'party_interrupt'],
+          })
+        }
         const request = service.requestBattleRes(caller, args.runId, args.slot as DpsSlot, args.resurrectionId)
         agentManager?.dispatchBattleRes(caller, args.runId, request.resurrectionId)
         return json(request)

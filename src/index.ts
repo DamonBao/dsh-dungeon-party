@@ -6,3 +6,8 @@ export * from './adapters/workspace-fingerprint.js'
 export * from './service/dungeon-service.js'
 export * from './service/memory-event-store.js'
 export * from './tools/register.js'
+export {
+  bundledPresetDirectory,
+  resolveDshHome,
+  syncDungeonPartyPreset,
+} from './preset-sync.js'

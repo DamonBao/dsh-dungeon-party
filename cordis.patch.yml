@@ -1,5 +1,6 @@
 # The runtime itself is mounted by the dungeon-party agent preset so its
-# registrations remain agent-scoped. This bundle patch intentionally inserts no
-# host-global service row; host persistence, tools, sandbox and Agent registries
-# remain owned by the selected DSH profile.
-[]
+# registrations remain agent-scoped. The host bootstrap only syncs the bundled
+# preset into DSH's user preset roster; runtime services remain agent-scoped.
+- insert:
+    - id: dungeon-party-preset-sync
+      name: dsh-dungeon-party/preset-sync
