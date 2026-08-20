@@ -96,7 +96,7 @@ describe('DSH dungeon tools', () => {
     expect((result as unknown as { workspaceFingerprint: string }).workspaceFingerprint).toMatch(/^sha256:/)
   })
 
-  it('treats the outer runId as authoritative when creating a work order', async () => {
+  it('generates task identity and treats the outer runId as authoritative', async () => {
     const { definitions, service } = setup()
     const start = definitions.find((definition) => definition.name === 'party_start')!
     const phase = definitions.find((definition) => definition.name === 'party_phase')!
@@ -108,7 +108,7 @@ describe('DSH dungeon tools', () => {
       runId: 'run',
       action: 'create',
       workOrder: {
-        id: 'task-1', runId: 'stale-model-value', title: 'Task', objective: 'Implement',
+        runId: 'stale-model-value', title: 'Task', objective: 'Implement',
         acceptanceCriteria: [{ description: 'Done' }],
         readScopes: ['src/**'], writeScopes: ['src/**'],
       },
@@ -156,6 +156,19 @@ describe('DSH dungeon tools', () => {
       code: 'MEMBER_NOT_DOWN',
       currentLifeState: 'alive',
       recommendedTools: ['party_request_checkpoint', 'party_interrupt'],
+    })
+  })
+
+  it('normalizes party messages when the model omits summary', async () => {
+    const { definitions } = setup()
+    const start = definitions.find((definition) => definition.name === 'party_start')!
+    const message = definitions.find((definition) => definition.name === 'party_message')!
+    await start.execute({ runId: 'run', objective: 'Build', workspaceRoot: process.cwd() }, execution('tank'))
+
+    await expect(message.execute({
+      runId: 'run', toSlot: 'tank', message: { kind: 'notice', evidence: ['Build completed'] },
+    }, execution('tank'))).resolves.toMatchObject({
+      kind: 'notice', summary: 'Build completed', evidence: ['Build completed'],
     })
   })
 
