@@ -1,0 +1,5 @@
+# The runtime itself is mounted by the dungeon-party agent preset so its
+# registrations remain agent-scoped. This bundle patch intentionally inserts no
+# host-global service row; host persistence, tools, sandbox and Agent registries
+# remain owned by the selected DSH profile.
+[]

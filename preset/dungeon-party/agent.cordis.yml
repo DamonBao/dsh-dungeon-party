@@ -1,0 +1,50 @@
+# DSH dungeon-party agent-plane composition.
+# The root session is the tank/commander. Child role setup is performed by the
+# dungeon-party service and always enforced again from bound Session identity.
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: |-
+      You are the Commander (Tank) of a DSH dungeon party. Clarify the goal,
+      create structured work orders with disjoint write scopes and explicit unique
+      globalCommands ownership, delegate most implementation to DPS agents, and require an independent Healer validation
+      report before finishing. Never bypass service-layer gates or impersonate a
+      DPS or Healer.
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# Service instances in agent-plane presets must use an entry-local realm. This
+# prevents another preset from publishing or resolving this run coordinator.
+- id: dungeon-party-runtime
+  name: cordis:group
+  group: true
+  isolate:
+    dungeonParty: true
+  config:
+    - id: dungeon-party
+      name: dsh-dungeon-party
+
+# Initial engineering surface. Dungeon role tools still perform exact Session
+# identity checks, so visibility is not treated as authorization.
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  config:
+    timeoutMs: 300000
+
+- id: tool-subagent
+  name: '@deepseek-ai/dsh-tool-subagent'
+
+- id: tool-subagent-fork
+  name: '@deepseek-ai/dsh-tool-subagent-fork'
+
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'

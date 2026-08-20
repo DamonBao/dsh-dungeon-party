@@ -1,0 +1,37 @@
+import type { AgentRegistry } from '@deepseek-ai/dsh-agent';
+import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets';
+import { type Actor, type DungeonService, type ExecutionReport, type PartyMessageInput, type PartySlot, type RunPhase } from '../service/dungeon-service.js';
+type ChildSlot = Exclude<PartySlot, 'tank'>;
+export declare class PartyAgentManager {
+    private readonly service;
+    private readonly agents;
+    private readonly presets;
+    private readonly handles;
+    private readonly commanderHandles;
+    private readonly dispatchedRecoveryIds;
+    private readonly leaseAudits;
+    private readonly pending;
+    constructor(service: DungeonService, agents: AgentRegistry, presets: AgentPresets);
+    prepareForPhase(actor: Actor, runId: string, phase: RunPhase): Promise<void>;
+    executeValidatorMaintenance(actor: Actor, runId: string): Promise<void>;
+    dispatchBattleRes(actor: Actor, runId: string, resurrectionId: string): void;
+    dispatchCommanderRescue(runId: string, ticketId: string): void;
+    ensureMember(actor: Actor, runId: string, slot: ChildSlot): Promise<string>;
+    recoverCommander(actor: Actor, runId: string, ticketId: string): Promise<void>;
+    completeDpsResurrection(actor: Actor, runId: string, resurrectionId: string, mode: 'resume' | 'replace'): Promise<string>;
+    requestCheckpoint(actor: Actor, runId: string, taskId: string): void;
+    beginLeaseAudit(actor: Actor, runId: string, taskId: string, leaseId: string): void;
+    auditWorkspaceBeforeSubmit(actor: Actor, runId: string, report: ExecutionReport): void;
+    completeLeaseAudit(runId: string, taskId: string): void;
+    interruptTask(actor: Actor, runId: string, taskId: string, turnId: string): Promise<void>;
+    sendPartyMessage(actor: Actor, runId: string, toSlot: PartySlot, input: PartyMessageInput): void;
+    dispatchTask(actor: Actor, runId: string, taskId: string): void;
+    forgetDisposedAgent(sessionId: string): void;
+    disposeRun(runId: string): Promise<void>;
+    dispose(): Promise<void>;
+    private installExecutionGuard;
+    private dispatchRecoveryToHealer;
+    private restoreMember;
+    private createMember;
+}
+export {};
