@@ -483,6 +483,14 @@ function clone<T>(value: T): T {
   return structuredClone(value)
 }
 
+function jsonClone<T>(value: T): T {
+  try {
+    return JSON.parse(JSON.stringify(value)) as T
+  } catch {
+    throw new DungeonError('NON_JSON_DATA', 'Dungeon state contains non-JSON-serializable data')
+  }
+}
+
 function createEmptySlots(runId: string): Record<PartySlot, SlotBinding> {
   return {
     tank: { runId, slot: 'tank', generation: 0, history: [] },
@@ -579,7 +587,7 @@ export class DungeonService {
   }
 
   startRun(input: StartRunInput): DungeonRun {
-    assert(input.objective.trim(), 'INVALID_OBJECTIVE', 'Run objective is required')
+    assert(typeof input.objective === 'string' && input.objective.trim(), 'INVALID_OBJECTIVE', 'Run objective is required')
     assert(input.tankSessionId, 'INVALID_TANK', 'Tank session is required')
     const runId = input.runId ?? this.idGenerator()
     const storedEvents = this.eventStore.load(runId)
@@ -697,9 +705,15 @@ export class DungeonService {
       )
       return clone(existingTask)
     }
-    assert(workOrder.objective.trim(), 'INVALID_TASK', 'Task objective is required')
-    assert(workOrder.version >= 1, 'INVALID_TASK_VERSION', 'Task version must be at least 1')
-    assert(workOrder.acceptanceCriteria.length > 0, 'INVALID_TASK', 'At least one acceptance criterion is required')
+    assert(typeof workOrder.objective === 'string' && workOrder.objective.trim(), 'INVALID_TASK', 'Task objective is required')
+    assert(Number.isSafeInteger(workOrder.version) && workOrder.version >= 1, 'INVALID_TASK_VERSION', 'Task version must be at least 1')
+    assert(Array.isArray(workOrder.acceptanceCriteria) && workOrder.acceptanceCriteria.length > 0, 'INVALID_TASK', 'At least one acceptance criterion is required')
+    assert(
+      workOrder.globalCommands === undefined ||
+        (Array.isArray(workOrder.globalCommands) && workOrder.globalCommands.every((command) => typeof command === 'string')),
+      'INVALID_GLOBAL_COMMAND',
+      'Global commands must be strings',
+    )
     const globalCommands = (workOrder.globalCommands ?? []).map(normalizeCommand)
     assert(globalCommands.every(Boolean), 'INVALID_GLOBAL_COMMAND', 'Global commands must not be empty')
     assert(new Set(globalCommands).size === globalCommands.length, 'INVALID_GLOBAL_COMMAND', 'Global commands must be unique within a work order')
@@ -714,7 +728,12 @@ export class DungeonService {
     const existingCriterionIds = new Set(Object.values(run.tasks).flatMap((record) => record.workOrder.acceptanceCriteria.map((criterion) => criterion.id)))
     const localCriterionIds = new Set<string>()
     for (const criterion of workOrder.acceptanceCriteria) {
-      assert(criterion.id && criterion.description.trim(), 'INVALID_CRITERION', 'Criteria need an id and description')
+      assert(
+        criterion && typeof criterion.id === 'string' && criterion.id &&
+          typeof criterion.description === 'string' && criterion.description.trim(),
+        'INVALID_CRITERION',
+        'Criteria need an id and description',
+      )
       assert(!existingCriterionIds.has(criterion.id) && !localCriterionIds.has(criterion.id), 'DUPLICATE_CRITERION', `Duplicate criterion ${criterion.id}`)
       localCriterionIds.add(criterion.id)
     }
@@ -863,7 +882,7 @@ export class DungeonService {
   markMemberDown(runId: string, slot: DpsSlot, reason: string): DungeonRun {
     const run = this.requireRun(runId)
     this.assertMutable(run)
-    assert(reason.trim(), 'FAILURE_REASON_REQUIRED', 'A member failure reason is required')
+    assert(typeof reason === 'string' && reason.trim(), 'FAILURE_REASON_REQUIRED', 'A member failure reason is required')
     assert(run.slots[slot].currentSessionId, 'UNBOUND_SLOT', `Slot ${slot} is not bound`)
     if (run.slots[slot].lifeState !== 'down') {
       this.append(run, 'dungeon/member-down', { slot, reason })
@@ -1245,7 +1264,7 @@ export class DungeonService {
     const run = this.requireRun(runId)
     const task = this.requireTask(run, taskId)
     assert(task.status === 'running' && task.activeLease, 'TASK_NOT_RUNNING', 'Only a running leased task can register a Turn')
-    assert(turnId.trim(), 'TURN_ID_REQUIRED', 'Turn id is required')
+    assert(typeof turnId === 'string' && turnId.trim(), 'TURN_ID_REQUIRED', 'Turn id is required')
     this.append(run, 'dungeon/task-turn-registered', { taskId, turnId })
     return clone(run.tasks[taskId]!)
   }
@@ -1593,7 +1612,7 @@ export class DungeonService {
     const run = this.requireTank(actor, runId)
     assert(run.phase === 'VALIDATING', 'INVALID_PHASE', 'Only a validating run can be completed')
     assert(run.controlState === 'normal', 'RUN_NOT_READY', 'Run control state must be normal')
-    assert(resultSummary.trim(), 'SUMMARY_REQUIRED', 'A user-facing result summary is required')
+    assert(typeof resultSummary === 'string' && resultSummary.trim(), 'SUMMARY_REQUIRED', 'A user-facing result summary is required')
     this.assertRequiredTasksComplete(run)
     assert(
       run.slots.tank.readiness === 'healthy' && run.slots.healer.readiness === 'healthy',
@@ -1697,7 +1716,7 @@ export class DungeonService {
     const fromSlot = this.findSlot(run, actor.sessionId)
     assert(fromSlot, 'FORBIDDEN', 'Only current party members can send party messages')
     assert(run.slots[toSlot].currentSessionId, 'UNBOUND_SLOT', `Target slot ${toSlot} is not bound`)
-    assert(input.summary.trim(), 'INVALID_MESSAGE', 'Party message summary is required')
+    assert(typeof input.summary === 'string' && input.summary.trim(), 'INVALID_MESSAGE', 'Party message summary is required')
     if (input.kind === 'blocked' || input.kind === 'risk') {
       assert(input.evidence.length > 0, 'MISSING_EVIDENCE', `${input.kind} messages require evidence`)
     }
@@ -1740,8 +1759,9 @@ export class DungeonService {
       payload,
       ...(actorSessionId ? { actorSessionId } : {}),
     }
-    this.eventStore.append(clone(event))
-    const updated = this.reduce(this.runs.get(run.id), event)
+    const canonicalEvent = jsonClone(event)
+    this.eventStore.append(canonicalEvent)
+    const updated = this.reduce(this.runs.get(run.id), canonicalEvent)
     this.runs.set(run.id, updated)
     Object.assign(run, updated)
     this.eventStore.publishProjection?.(clone(updated))

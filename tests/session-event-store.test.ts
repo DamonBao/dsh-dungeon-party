@@ -26,7 +26,7 @@ describe('SessionDungeonEventStore', () => {
       type: 'dungeon/run-created',
       actorSessionId: 'tank',
       occurredAt: '2025-01-01T00:00:00.000Z',
-      payload: { objective: 'Build' },
+      payload: { objective: 'Build', optionalModelField: undefined },
     }
 
     store.append(event)
@@ -37,7 +37,10 @@ describe('SessionDungeonEventStore', () => {
     store.publishProjection({ id: 'run-1' } as DungeonRun)
 
     const recreated = new SessionDungeonEventStore(root.sessions)
-    expect(recreated.load('run-1')).toEqual([event])
+    expect(recreated.load('run-1')).toEqual([{
+      ...event,
+      payload: { objective: 'Build' },
+    }])
     expect(recreated.listRunIds()).toEqual(['run-1'])
     expect(root.sessions.get('tank' as never)?.events.at(-1)?.type).toBe('dungeon/projection')
   })

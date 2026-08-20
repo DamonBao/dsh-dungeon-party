@@ -10,36 +10,41 @@ declare module '@deepseek-ai/dsh-session/types' {
   }
 }
 
+function jsonClone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
 export class SessionDungeonEventStore implements DungeonEventStore {
   private readonly runSessions = new Map<string, Session>()
 
   constructor(private readonly sessions: SessionStore) {}
 
   append(event: DungeonEvent): void {
-    const existing = this.load(event.runId)
-    const duplicate = existing.find((item) => item.eventId === event.eventId)
+    const canonicalEvent = jsonClone(event)
+    const existing = this.load(canonicalEvent.runId)
+    const duplicate = existing.find((item) => item.eventId === canonicalEvent.eventId)
     if (duplicate) {
-      if (JSON.stringify(duplicate) !== JSON.stringify(event)) {
-        throw new DungeonError('EVENT_ID_CONFLICT', `Event ${event.eventId} already exists with different content`)
+      if (JSON.stringify(duplicate) !== JSON.stringify(canonicalEvent)) {
+        throw new DungeonError('EVENT_ID_CONFLICT', `Event ${canonicalEvent.eventId} already exists with different content`)
       }
       return
     }
     const expectedSequence = (existing.at(-1)?.sequence ?? 0) + 1
-    if (event.sequence !== expectedSequence) {
-      throw new DungeonError('EVENT_SEQUENCE_CONFLICT', `Expected sequence ${expectedSequence}, received ${event.sequence}`)
+    if (canonicalEvent.sequence !== expectedSequence) {
+      throw new DungeonError('EVENT_SEQUENCE_CONFLICT', `Expected sequence ${expectedSequence}, received ${canonicalEvent.sequence}`)
     }
-    const session = this.resolveSession(event.runId, event.actorSessionId)
+    const session = this.resolveSession(canonicalEvent.runId, canonicalEvent.actorSessionId)
     if (!session) {
-      throw new Error(`Cannot persist dungeon run ${event.runId}: Lead Session is not live`)
+      throw new Error(`Cannot persist dungeon run ${canonicalEvent.runId}: Lead Session is not live`)
     }
-    session.append('dungeon/event', structuredClone(event))
-    this.runSessions.set(event.runId, session)
+    session.append('dungeon/event', canonicalEvent)
+    this.runSessions.set(canonicalEvent.runId, session)
   }
 
   publishProjection(run: DungeonRun): void {
     const session = this.resolveSession(run.id)
     if (!session) throw new Error(`Cannot publish dungeon run ${run.id}: Lead Session is not live`)
-    session.append('dungeon/projection', structuredClone(run))
+    session.append('dungeon/projection', jsonClone(run))
   }
 
   listRunIds(): string[] {
