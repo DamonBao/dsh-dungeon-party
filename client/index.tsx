@@ -1,4 +1,4 @@
-import { useMemo, useState, type CSSProperties } from 'react'
+import { useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import type { ClientContext, ISessions, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -42,9 +42,9 @@ const styles = `
 .dp-launcher{position:fixed;right:18px;top:16px;z-index:78;display:flex;align-items:center;gap:9px;min-height:40px;padding:5px 13px 5px 6px;border:1px solid #8b6a34;border-radius:22px;background:#111720;color:#f3ddb0;box-shadow:0 8px 28px #0009,inset 0 0 0 1px #d8ad4c22;cursor:pointer;pointer-events:auto}
 .dp-launcher:hover{border-color:#e2b85d;box-shadow:0 0 22px #d59b3855,0 10px 32px #000b}.dp-launcher:focus-visible,.dp-button:focus-visible,.dp-tab:focus-visible,.dp-close:focus-visible{outline:2px solid #ffd777;outline-offset:2px}
 .dp-emblem{display:grid;place-items:center;width:28px;height:28px;border:1px solid #e6bd65;border-radius:50%;background:#261d11;color:#ffd77d;font-size:15px}.dp-launch-phase{font-size:10px;color:#b8a57e;text-transform:uppercase;letter-spacing:.12em}.dp-launch-title{font-size:12px;font-weight:750}
-.dp-panel{position:fixed;z-index:79;top:68px;right:18px;bottom:18px;width:min(440px,calc(100vw - 36px));display:flex;flex-direction:column;overflow:hidden;border:1px solid #8b6a34;border-radius:14px;background:radial-gradient(circle at 80% -20%,#3b2c1744,transparent 38%),#0c1118;box-shadow:0 24px 70px #000c,0 0 0 1px #000,inset 0 1px #f6cf7755;pointer-events:auto}
+.dp-panel{position:fixed;z-index:79;top:68px;right:18px;bottom:18px;max-width:calc(100vw - 36px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #8b6a34;border-radius:14px;background:radial-gradient(circle at 80% -20%,#3b2c1744,transparent 38%),#0c1118;box-shadow:0 24px 70px #000c,0 0 0 1px #000,inset 0 1px #f6cf7755;pointer-events:auto}
 .dp-panel::before{content:"";height:3px;flex:none;background:linear-gradient(90deg,transparent,#d6a84f 20%,#ffdf8d 50%,#d6a84f 80%,transparent)}
-.dp-header{padding:17px 18px 13px;border-bottom:1px solid #5e4a2c;background:#121924}.dp-header-line{display:flex;align-items:flex-start;gap:12px}.dp-crest{display:grid;place-items:center;flex:none;width:46px;height:46px;border:1px solid #c99a45;border-radius:8px;background:#251c11;color:#f3c96e;font-size:25px;box-shadow:inset 0 0 18px #000}.dp-eyebrow{color:#c9a55e;font-size:10px;font-weight:800;letter-spacing:.18em;text-transform:uppercase}.dp-title{margin:2px 0 0;color:#fff1c9;font-family:Georgia,"Times New Roman",serif;font-size:20px;line-height:1.15;letter-spacing:.025em}.dp-objective{overflow:hidden;margin:5px 0 0;color:#aeb5c0;font-size:11px;line-height:1.4;text-overflow:ellipsis;white-space:nowrap}.dp-close{margin-left:auto;border:0;background:transparent;color:#9ea5af;font-size:19px;cursor:pointer}.dp-close:hover{color:#fff}
+.dp-header{padding:17px 18px 13px;border-bottom:1px solid #5e4a2c;background:#121924;cursor:move;user-select:none;touch-action:none}.dp-resize{position:absolute;z-index:2;left:-4px;top:54px;bottom:12px;width:9px;cursor:ew-resize;touch-action:none}.dp-resize::after{content:"";position:absolute;left:4px;top:42%;width:2px;height:48px;border-radius:2px;background:#9b773d88}.dp-resize:hover::after{background:#efbd61}.dp-header-line{display:flex;align-items:flex-start;gap:12px}.dp-crest{display:grid;place-items:center;flex:none;width:46px;height:46px;border:1px solid #c99a45;border-radius:8px;background:#251c11;color:#f3c96e;font-size:25px;box-shadow:inset 0 0 18px #000}.dp-eyebrow{color:#c9a55e;font-size:10px;font-weight:800;letter-spacing:.18em;text-transform:uppercase}.dp-title{margin:2px 0 0;color:#fff1c9;font-family:Georgia,"Times New Roman",serif;font-size:20px;line-height:1.15;letter-spacing:.025em}.dp-objective{overflow:hidden;margin:5px 0 0;color:#aeb5c0;font-size:11px;line-height:1.4;text-overflow:ellipsis;white-space:nowrap}.dp-close{margin-left:auto;border:0;background:transparent;color:#9ea5af;font-size:19px;cursor:pointer}.dp-close:hover{color:#fff}
 .dp-progress-meta{display:flex;justify-content:space-between;margin-top:14px;color:#b7bdc6;font-size:10px}.dp-progress{height:5px;margin-top:6px;overflow:hidden;border:1px solid #282f39;border-radius:3px;background:#05070a}.dp-progress>span{display:block;height:100%;background:#c9a247;box-shadow:0 0 10px #e8bd57;transition:width .25s ease}
 .dp-tabs{display:grid;grid-template-columns:repeat(4,1fr);flex:none;border-bottom:1px solid #383229;background:#0b0f15}.dp-tab{padding:10px 4px;border:0;border-right:1px solid #252a31;background:transparent;color:#8f98a5;font-size:10px;font-weight:800;letter-spacing:.08em;cursor:pointer}.dp-tab[data-active=true]{background:#2b211488;color:#f2c66d;box-shadow:inset 0 -2px #d9a849}.dp-tab:hover{color:#ece1ca}
 .dp-content{overflow:auto;min-height:0;padding:13px;scrollbar-color:#66502d #10151d}.dp-section-head{display:flex;align-items:center;justify-content:space-between;margin:1px 2px 9px}.dp-section-title{color:#d4b06a;font-family:Georgia,"Times New Roman",serif;font-size:13px;font-weight:700;letter-spacing:.06em}.dp-section-meta{color:#77818e;font-size:9px;text-transform:uppercase;letter-spacing:.12em}
@@ -53,7 +53,7 @@ const styles = `
 .dp-quest-list{display:grid;gap:8px}.dp-quest{position:relative;padding:10px 10px 10px 13px;border:1px solid #2a323d;border-radius:7px;background:#111821}.dp-quest::before{content:"";position:absolute;inset:8px auto 8px 0;width:2px;background:var(--quest-color,#8b949f)}.dp-quest-top{display:flex;align-items:center;gap:8px}.dp-quest-id{color:#c69d53;font:700 9px ui-monospace,monospace}.dp-quest-title{overflow:hidden;flex:1;color:#e8ebef;font-size:11px;font-weight:700;text-overflow:ellipsis;white-space:nowrap}.dp-badge{padding:2px 6px;border:1px solid #3b4653;border-radius:8px;color:#aeb7c2;font-size:8px}.dp-quest-detail{margin-top:6px;color:#87919e;font-size:9px}.dp-deps{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px}.dp-dep{padding:2px 5px;border-radius:3px;background:#272116;color:#cfaa65;font:8px ui-monospace,monospace}
 .dp-empty{padding:28px 12px;text-align:center;color:#737e8b;font-size:11px}.dp-empty-glyph{display:block;margin-bottom:8px;color:#7f693d;font-size:30px}.dp-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:12px}.dp-metric{padding:10px 6px;border:1px solid #2e3742;border-radius:7px;background:#111821;text-align:center}.dp-metric strong{display:block;color:#f0cc80;font-family:Georgia,serif;font-size:19px}.dp-metric span{color:#818b98;font-size:8px;text-transform:uppercase;letter-spacing:.08em}.dp-timeline{display:grid;gap:0}.dp-event{position:relative;margin-left:7px;padding:0 0 13px 17px;border-left:1px solid #3a424d;color:#aab2bd;font-size:10px;line-height:1.45}.dp-event::before{content:"";position:absolute;left:-4px;top:3px;width:7px;height:7px;border:1px solid #d2a44f;border-radius:50%;background:#161c24}.dp-event strong{display:block;color:#e0e4e9;font-size:10px}.dp-time{color:#687381;font:8px ui-monospace,monospace}
 .dp-actions{display:grid;gap:8px}.dp-button{min-height:38px;padding:8px 10px;border:1px solid #675333;border-radius:7px;background:#19160f;color:#d9bd83;font-size:10px;font-weight:700;text-align:left;cursor:pointer}.dp-button:hover{border-color:#bf9345;background:#282014;color:#ffe0a0}.dp-confirm{margin-top:10px;padding:11px;border:1px solid #a77938;border-radius:8px;background:#21190f;color:#d8c39d;font-size:10px}.dp-confirm strong{color:#ffcf74}.dp-confirm-row{display:flex;gap:7px;margin-top:9px}.dp-confirm-row button{padding:6px 10px;border:1px solid #715933;border-radius:5px;background:#171b21;color:#d8dce2;font-size:9px;cursor:pointer}.dp-feedback{color:#79c58b;font-size:10px}.dp-raw{margin-top:12px;color:#89939f;font-size:10px}.dp-raw pre{max-height:240px;overflow:auto;padding:8px;background:#05070a;font-size:8px}
-@media(max-width:720px){.dp-panel{top:58px;right:8px;bottom:8px;width:calc(100vw - 16px)}.dp-launcher{right:9px;top:9px}.dp-title{font-size:17px}}
+@media(max-width:720px){.dp-panel{top:58px;right:8px;bottom:8px;width:calc(100vw - 16px)!important;transform:none!important}.dp-resize{display:none}.dp-launcher{right:9px;top:9px}.dp-title{font-size:17px}}
 @media(prefers-reduced-motion:reduce){.dp-progress>span,.dp-bar>span{transition:none}}
 `
 
@@ -96,7 +96,38 @@ export function DungeonPartyOverlay({ useSessions, requestAction }: DungeonParty
   const [pendingInstruction, setPendingInstruction] = useState<string>()
   const [feedback, setFeedback] = useState<string>()
   const [isSubmitting, setSubmitting] = useState(false)
+  const [panelWidth, setPanelWidth] = useState(372)
+  const [panelOffset, setPanelOffset] = useState({ x: 0, y: 0 })
+  const drag = useRef<{ pointerId: number; clientX: number; clientY: number; x: number; y: number }>()
+  const resize = useRef<{ pointerId: number; clientX: number; width: number }>()
   const tasks = useMemo(() => run ? Object.values(run.tasks) : [], [run])
+  const beginDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button !== 0) return
+    drag.current = { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY, ...panelOffset }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+  const moveDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    const active = drag.current
+    if (!active || active.pointerId !== event.pointerId) return
+    setPanelOffset({ x: active.x + event.clientX - active.clientX, y: active.y + event.clientY - active.clientY })
+  }
+  const endDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    if (drag.current?.pointerId === event.pointerId) drag.current = undefined
+  }
+  const beginResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    event.stopPropagation()
+    resize.current = { pointerId: event.pointerId, clientX: event.clientX, width: panelWidth }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+  const moveResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const active = resize.current
+    if (!active || active.pointerId !== event.pointerId) return
+    setPanelWidth(Math.min(520, Math.max(320, active.width + active.clientX - event.clientX)))
+  }
+  const endResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (resize.current?.pointerId === event.pointerId) resize.current = undefined
+  }
   if (!run) return null
 
   const accepted = tasks.filter((task) => task.status === 'completed').length
@@ -108,8 +139,14 @@ export function DungeonPartyOverlay({ useSessions, requestAction }: DungeonParty
       <span className="dp-emblem">⚔</span>
       <span><span className="dp-launch-phase">{phaseName[run.phase] ?? run.phase}</span><br/><span className="dp-launch-title">永夜秘境 · {progress}%</span></span>
     </button>
-    {open ? <aside className="dp-panel" role="dialog" aria-label="永夜秘境副本状态">
-      <header className="dp-header">
+    {open ? <aside className="dp-panel" role="dialog" aria-label="永夜秘境副本状态" style={{
+      width: panelWidth,
+      transform: `translate3d(${panelOffset.x}px, ${panelOffset.y}px, 0)`,
+    }}>
+      <div className="dp-resize" role="separator" aria-label="调整副本面板宽度" aria-orientation="vertical"
+        onPointerDown={beginResize} onPointerMove={moveResize} onPointerUp={endResize} onPointerCancel={endResize}/>
+      <header className="dp-header" onPointerDown={beginDrag} onPointerMove={moveDrag} onPointerUp={endDrag}
+        onPointerCancel={endDrag} onDoubleClick={() => setPanelOffset({ x: 0, y: 0 })}>
         <div className="dp-header-line">
           <span className="dp-crest" aria-hidden>♜</span>
           <div style={{ minWidth: 0 }}>
@@ -117,7 +154,7 @@ export function DungeonPartyOverlay({ useSessions, requestAction }: DungeonParty
             <h1 className="dp-title">永夜堡垒 · 五人突击队</h1>
             <p className="dp-objective">首领目标：{run.objective}</p>
           </div>
-          <button type="button" className="dp-close" aria-label="关闭副本面板" onClick={() => setOpen(false)}>×</button>
+          <button type="button" className="dp-close" aria-label="关闭副本面板" onPointerDown={(event) => event.stopPropagation()} onClick={() => setOpen(false)}>×</button>
         </div>
         <div className="dp-progress-meta"><span>{phaseName[run.phase] ?? run.phase}</span><span>{accepted}/{tasks.length} 首领目标</span></div>
         <div className="dp-progress" aria-label={`副本进度 ${progress}%`}><span style={{ width: `${progress}%` }}/></div>
