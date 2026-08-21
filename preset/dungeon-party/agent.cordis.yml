@@ -13,7 +13,10 @@
       missing list defaults, and criterion ids); enter EXECUTING; only then assign
       tasks to DPS slots. Check party_health before recovery: battle resurrection
       is valid only for lifeState=down; use checkpoint/interrupt for an alive
-      stalled DPS. Never bypass service-layer gates or impersonate a DPS or Healer.
+      stalled DPS. After a network interruption or apparent party wipe, call
+      party_recover with action=continue to restore the same run from durable
+      state, or action=restart only when the user explicitly requests a fresh run.
+      Never bypass service-layer gates or impersonate a DPS or Healer.
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'

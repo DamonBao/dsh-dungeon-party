@@ -62,6 +62,7 @@ describe('DSH dungeon tools', () => {
       'party_interrupt',
       'party_review_quarantine',
       'party_reassign',
+      'party_recover',
       'party_resume_dispatch',
       'request_battle_res',
       'work_claim',
@@ -195,6 +196,42 @@ describe('DSH dungeon tools', () => {
     expect(service.getRun('run').tasks['task-1']?.executionReports[0]).toMatchObject({
       slot: 'dps-1', generation: 1, taskVersion: 1, status: 'completed', evidence: ['Tests passed'],
     })
+  })
+
+  it('keeps status and wait results bounded as durable history grows', async () => {
+    const { definitions, service } = setup()
+    const start = definitions.find((definition) => definition.name === 'party_start')!
+    const status = definitions.find((definition) => definition.name === 'party_status')!
+    const wait = definitions.find((definition) => definition.name === 'party_wait')!
+    await start.execute({ runId: 'run', objective: 'Build', workspaceRoot: process.cwd() }, execution('tank'))
+    for (let index = 0; index < 80; index += 1) {
+      service.sendPartyMessage({ sessionId: 'tank' }, 'run', 'tank', {
+        kind: 'notice', summary: `message-${index}-${'x'.repeat(500)}`, evidence: ['y'.repeat(500)],
+      })
+    }
+
+    const statusResult = await status.execute({ runId: 'run' }, execution('tank'))
+    const waitResult = await wait.execute({ runId: 'run', afterSequence: 0, timeoutMs: 1 }, execution('tank')) as unknown as {
+      events: unknown[]; omittedEventCount: number
+    }
+
+    expect(JSON.stringify(statusResult).length).toBeLessThan(12_000)
+    expect(JSON.stringify(waitResult).length).toBeLessThan(16_000)
+    expect(waitResult.events).toHaveLength(24)
+    expect(waitResult.omittedEventCount).toBeGreaterThan(0)
+  })
+
+  it('restarts a wiped dungeon with a host-generated fresh run', async () => {
+    const { definitions, service } = setup()
+    const start = definitions.find((definition) => definition.name === 'party_start')!
+    const recover = definitions.find((definition) => definition.name === 'party_recover')!
+    await start.execute({ runId: 'run', objective: 'Build', workspaceRoot: process.cwd() }, execution('tank'))
+
+    const restarted = await recover.execute({ runId: 'run', action: 'restart' }, execution('tank')) as unknown as { id: string; phase: string }
+
+    expect(restarted.id).not.toBe('run')
+    expect(restarted.phase).toBe('FORMING')
+    expect(service.getRun('run').phase).toBe('CANCELLED')
   })
 
   it('rejects tool calls without an authenticated agent identity', async () => {

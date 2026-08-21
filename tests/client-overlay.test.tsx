@@ -59,7 +59,7 @@ describe('DungeonPartyOverlay', () => {
     } as never)) as never
     const renderer = create(<DungeonPartyOverlay requestAction={async () => true} useSessions={useSessions} useWorkspaces={(() => undefined) as never} />)
     const panel = renderer.root.findByProps({ role: 'dialog' })
-    expect(panel.props.style).toMatchObject({ width: 372, transform: 'translate3d(0px, 0px, 0)' })
+    expect(panel.props.style).toMatchObject({ width: 348, height: 520, transform: 'translate3d(0px, 0px, 0)' })
 
     const header = renderer.root.findByProps({ className: 'dp-header' })
     const capture = vi.fn()
@@ -70,8 +70,20 @@ describe('DungeonPartyOverlay', () => {
 
     const resize = renderer.root.findByProps({ 'aria-label': '调整副本面板宽度' })
     act(() => resize.props.onPointerDown({ button: 0, pointerId: 2, clientX: 100, stopPropagation: vi.fn(), currentTarget: { setPointerCapture: vi.fn() } }))
-    act(() => resize.props.onPointerMove({ pointerId: 2, clientX: 52 }))
+    act(() => resize.props.onPointerMove({ pointerId: 2, clientX: 28 }))
     expect(renderer.root.findByProps({ role: 'dialog' }).props.style.width).toBe(420)
+
+    const heightResize = renderer.root.findByProps({ 'aria-label': '调整副本面板高度' })
+    act(() => heightResize.props.onPointerDown({ button: 0, pointerId: 3, clientY: 100, stopPropagation: vi.fn(), currentTarget: { setPointerCapture: vi.fn() } }))
+    act(() => heightResize.props.onPointerMove({ pointerId: 3, clientY: 140 }))
+    expect(renderer.root.findByProps({ role: 'dialog' }).props.style.height).toBe(560)
+
+    act(() => renderer.root.findByProps({ 'aria-label': '关闭副本面板' }).props.onClick({ stopPropagation: vi.fn() }))
+    expect(renderer.root.findAllByProps({ role: 'dialog' })).toHaveLength(0)
+    const launcher = renderer.root.findByProps({ 'aria-label': '打开副本面板' })
+    act(() => launcher.props.onPointerDown({ button: 0, pointerId: 4, clientX: 100, clientY: 40, currentTarget: { setPointerCapture: vi.fn() } }))
+    act(() => launcher.props.onPointerMove({ pointerId: 4, clientX: 75, clientY: 60 }))
+    expect(renderer.root.findByProps({ 'aria-label': '打开副本面板' }).props.style.transform).toBe('translate3d(-25px, 20px, 0)')
   })
 
   it('requires confirmation before queuing a recovery instruction', async () => {

@@ -1137,6 +1137,20 @@ export class DungeonService {
     return clone(run.commanderRescueTickets.find((item) => item.ticketId === ticketId)!)
   }
 
+  recoverRunAfterCommanderReturn(actor: Actor, runId: string): DungeonRun {
+    let run = this.requireTank(actor, runId)
+    this.assertMutable(run)
+    if (run.controlState === 'normal' && run.slots.tank.lifeState === 'alive') return clone(run)
+    this.sweepExpiredState(runId)
+    run = this.requireTank(actor, runId)
+    const ticket = run.commanderRescueTickets.find((item) => item.status === 'issued' || item.status === 'consumed')
+    this.append(run, 'dungeon/commander-returned', {
+      resumedAt: this.clock(),
+      ...(ticket ? { ticketId: ticket.ticketId, refundCharge: ticket.status === 'issued' } : {}),
+    }, actor.sessionId)
+    return clone(run)
+  }
+
   resumeDispatch(actor: Actor, runId: string): DungeonRun {
     const run = this.requireTank(actor, runId)
     assert(run.controlState === 'recovering' || run.controlState === 'throttled', 'DISPATCH_NOT_PAUSED', 'Dispatch is not ready to resume')
@@ -2054,6 +2068,18 @@ export class DungeonService {
       case 'dungeon/dispatch-paused':
         run.controlState = 'paused'
         break
+      case 'dungeon/commander-returned': {
+        const ticket = payload.ticketId
+          ? run.commanderRescueTickets.find((item) => item.ticketId === payload.ticketId)
+          : undefined
+        if (ticket) ticket.status = 'completed'
+        if (payload.refundCharge) run.commanderBattleResChargesRemaining += 1
+        run.controlState = 'normal'
+        run.commanderLoad = 'normal'
+        run.slots.tank.lifeState = 'alive'
+        run.slots.tank.readiness = 'healthy'
+        break
+      }
       case 'dungeon/dispatch-resumed':
         run.controlState = 'normal'
         run.commanderLoad = 'normal'

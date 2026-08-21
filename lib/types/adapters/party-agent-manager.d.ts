@@ -12,6 +12,7 @@ export declare class PartyAgentManager {
     private readonly leaseAudits;
     private readonly pending;
     constructor(service: DungeonService, agents: AgentRegistry, presets: AgentPresets);
+    restoreBoundParty(actor: Actor, runId: string): Promise<void>;
     prepareForPhase(actor: Actor, runId: string, phase: RunPhase): Promise<void>;
     kickScheduler(runId: string): Promise<string[]>;
     dispatchAvailableTasks(actor: Actor, runId: string): Promise<string[]>;
@@ -33,6 +34,7 @@ export declare class PartyAgentManager {
     dispose(): Promise<void>;
     private installExecutionGuard;
     private dispatchRecoveryToHealer;
+    private ensureSubagentDescriptor;
     private restoreMember;
     private createMember;
 }

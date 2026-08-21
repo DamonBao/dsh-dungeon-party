@@ -364,6 +364,7 @@ export declare class DungeonService {
         success: boolean;
         sessionId: string;
     }): CommanderRescueTicket;
+    recoverRunAfterCommanderReturn(actor: Actor, runId: string): DungeonRun;
     resumeDispatch(actor: Actor, runId: string): DungeonRun;
     observeAgentTurnEnd(sessionId: string, reason: 'completed' | 'aborted' | 'blocked' | 'error' | 'max-tokens' | 'interrupted', evidence: string[]): HealthSignal[];
     observeHealthSignal(runId: string, input: HealthSignalInput): HealthSignal;

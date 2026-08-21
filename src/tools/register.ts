@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type JsonValue, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 
@@ -7,6 +8,8 @@ import {
   DungeonError,
   type DpsCheckpoint,
   type DpsSlot,
+  type DungeonEvent,
+  type DungeonRun,
   type ExecutionReport,
   type PartyMessageInput,
   type PartySlot,
@@ -23,6 +26,75 @@ function actor(exec: ToolRunContext): { sessionId: string } {
 
 function json<T>(value: T): JsonValue {
   return JSON.parse(JSON.stringify(value)) as JsonValue
+}
+
+function boundedText(value: string | undefined, limit = 500): string | undefined {
+  if (value === undefined || value.length <= limit) return value
+  return `${value.slice(0, limit)}…`
+}
+
+function summarizeRun(run: DungeonRun) {
+  const tasks = Object.entries(run.tasks).slice(0, 100).map(([id, task]) => ({
+    id,
+    title: task.workOrder.title,
+    status: task.status,
+    progressState: task.progressState,
+    ownerSlot: task.ownerSlot,
+    blockedBy: task.workOrder.blockedBy,
+    taskVersion: task.workOrder.version,
+    leaseVersion: task.activeLease?.version,
+    nextCheckpointDueAt: task.nextCheckpointDueAt,
+    summary: boundedText(task.executionReports.at(-1)?.summary, 300),
+  }))
+  return {
+    id: run.id,
+    phase: run.phase,
+    objective: boundedText(run.objective, 1_000),
+    workspaceFingerprint: run.workspaceFingerprint,
+    controlState: run.controlState,
+    commanderLoad: run.commanderLoad,
+    slots: run.slots,
+    tasks,
+    taskCount: Object.keys(run.tasks).length,
+    omittedTaskCount: Math.max(0, Object.keys(run.tasks).length - tasks.length),
+    latestMessages: run.messages.slice(-8).map((message) => ({
+      messageId: message.messageId,
+      fromSlot: message.fromSlot,
+      kind: message.kind,
+      summary: boundedText(message.summary, 300),
+      createdAt: message.createdAt,
+    })),
+    recentHealthSignals: run.healthSignals.slice(-8).map((signal) => ({
+      id: signal.id,
+      slot: signal.slot,
+      kind: signal.kind,
+      severity: signal.severity,
+      observedAt: signal.observedAt,
+    })),
+    battleResChargesRemaining: run.battleResChargesRemaining,
+    commanderBattleResChargesRemaining: run.commanderBattleResChargesRemaining,
+    validationReportCount: run.validationReports.length,
+    resultSummary: boundedText(run.resultSummary, 500),
+    updatedAt: run.updatedAt,
+  }
+}
+
+function summarizeEvents(events: DungeonEvent[]) {
+  return events.slice(-24).map((event) => {
+    const payload = typeof event.payload === 'object' && event.payload !== null
+      ? event.payload as Record<string, unknown>
+      : {}
+    return {
+      sequence: event.sequence,
+      type: event.type,
+      occurredAt: event.occurredAt,
+      ...['taskId', 'slot', 'phase', 'status', 'reason', 'ticketId', 'resurrectionId']
+        .reduce<Record<string, unknown>>((result, key) => {
+          if (typeof payload[key] === 'string' || typeof payload[key] === 'number') result[key] = payload[key]
+          return result
+        }, {}),
+    }
+  })
 }
 
 function stringList(value: unknown, field: string): string[] {
@@ -184,13 +256,13 @@ export function registerDungeonTools(
           args.workspaceRoot,
           service.getFingerprintIgnoreScopes(),
         )
-        return json(service.startRun({
+        return json(summarizeRun(service.startRun({
           ...(args.runId ? { runId: args.runId } : {}),
           objective: args.objective,
           workspaceRoot: args.workspaceRoot,
           workspaceFingerprint,
           tankSessionId: caller.sessionId,
-        }))
+        })))
       },
     })),
     ctx.tools.register(defineTool({
@@ -204,7 +276,7 @@ export function registerDungeonTools(
         const caller = actor(exec)
         service.getRunForActor(caller, args.runId)
         service.sweepExpiredState(args.runId)
-        return json(service.getRunForActor(caller, args.runId))
+        return json(summarizeRun(service.getRunForActor(caller, args.runId)))
       },
     })),
     ctx.tools.register(defineTool({
@@ -220,9 +292,15 @@ export function registerDungeonTools(
         const caller = actor(exec)
         service.getRunForActor(caller, args.runId)
         service.sweepExpiredState(args.runId)
-        return json(await service.waitForChange(
+        const result = await service.waitForChange(
           caller, args.runId, args.afterSequence, args.timeoutMs ?? 30_000, exec.signal,
-        ))
+        )
+        return json({
+          run: summarizeRun(result.run),
+          events: summarizeEvents(result.events),
+          omittedEventCount: Math.max(0, result.events.length - 24),
+          timedOut: result.timedOut,
+        })
       },
     })),
     ctx.tools.register(defineTool({
@@ -243,14 +321,14 @@ export function registerDungeonTools(
         if (phase === 'VALIDATING') {
           const run = service.changePhase(caller, args.runId, phase)
           await agentManager?.prepareForPhase(caller, args.runId, phase)
-          return json(run)
+          return json(summarizeRun(run))
         }
         await agentManager?.prepareForPhase(caller, args.runId, phase)
         service.changePhase(caller, args.runId, phase)
         if (phase === 'EXECUTING' || phase === 'REPAIR') {
           await agentManager?.dispatchAvailableTasks?.(caller, args.runId)
         }
-        return json(service.getRunForActor(caller, args.runId))
+        return json(summarizeRun(service.getRunForActor(caller, args.runId)))
       },
     })),
     ctx.tools.register(defineTool({
@@ -270,8 +348,10 @@ export function registerDungeonTools(
           commanderLoad: run.commanderLoad,
           commanderCheckpoint: run.commanderCheckpoint,
           slots: run.slots,
-          healthSignals: run.healthSignals,
-          taskProgress: Object.fromEntries(Object.entries(run.tasks).map(([id, task]) => [id, {
+          healthSignals: run.healthSignals.slice(-16).map((signal) => ({
+            id: signal.id, slot: signal.slot, kind: signal.kind, severity: signal.severity, observedAt: signal.observedAt,
+          })),
+          taskProgress: Object.fromEntries(Object.entries(run.tasks).slice(0, 100).map(([id, task]) => [id, {
             progressState: task.progressState,
             missedCheckpoints: task.missedCheckpoints,
             nextCheckpointDueAt: task.nextCheckpointDueAt,
@@ -458,6 +538,39 @@ export function registerDungeonTools(
       },
     })),
     ctx.tools.register(defineTool({
+      name: 'party_recover',
+      description: 'As the original Commander after a network stop, continue the existing dungeon or restart it as a fresh run. The host generates the new run id when restarting.',
+      parameters: {
+        runId: { type: 'string', required: true },
+        action: { type: 'string', enum: ['continue', 'restart'], required: true },
+        newRunId: { type: 'string', description: 'Optional explicit id for restart; normally omit it.' },
+      },
+      output,
+      async execute(args, exec) {
+        const caller = actor(exec)
+        if (args.action === 'continue') {
+          const run = service.recoverRunAfterCommanderReturn(caller, args.runId)
+          await agentManager?.restoreBoundParty(caller, args.runId)
+          await agentManager?.kickScheduler(args.runId)
+          return json(summarizeRun(run))
+        }
+        const previous = service.getRunForActor(caller, args.runId)
+        if (!['COMPLETED', 'FAILED', 'CANCELLED'].includes(previous.phase)) {
+          service.changePhase(caller, args.runId, 'CANCELLED')
+        }
+        await agentManager?.disposeRun(args.runId)
+        const newRunId = args.newRunId?.trim() || `run-${randomUUID()}`
+        const workspaceFingerprint = computeWorkspaceFingerprint(previous.workspaceRoot, service.getFingerprintIgnoreScopes())
+        return json(summarizeRun(service.startRun({
+          runId: newRunId,
+          objective: previous.objective,
+          workspaceRoot: previous.workspaceRoot,
+          workspaceFingerprint,
+          tankSessionId: caller.sessionId,
+        })))
+      },
+    })),
+    ctx.tools.register(defineTool({
       name: 'party_resume_dispatch',
       description: 'As the recovered tank, resume dispatch after reviewing the commander checkpoint.',
       parameters: {
@@ -465,7 +578,7 @@ export function registerDungeonTools(
       },
       output,
       async execute(args, exec) {
-        return json(service.resumeDispatch(actor(exec), args.runId))
+        return json(summarizeRun(service.resumeDispatch(actor(exec), args.runId)))
       },
     })),
     ctx.tools.register(defineTool({
@@ -706,7 +819,7 @@ export function registerDungeonTools(
         const fingerprint = computeWorkspaceFingerprint(current.workspaceRoot, service.getFingerprintIgnoreScopes())
         const run = service.finishRun(caller, args.runId, args.resultSummary, fingerprint)
         await agentManager?.disposeRun(args.runId)
-        return json(run)
+        return json(summarizeRun(run))
       },
     })),
     ctx.tools.register(defineTool({
@@ -719,7 +832,7 @@ export function registerDungeonTools(
       async execute(args, exec) {
         const run = service.changePhase(actor(exec), args.runId, 'CANCELLED')
         await agentManager?.disposeRun(args.runId)
-        return json(run)
+        return json(summarizeRun(run))
       },
     })),
   ]

@@ -30,15 +30,17 @@ function setup(workspaceRoot = '/workspace') {
   }
   const dispose = vi.fn(async () => undefined)
   const send = vi.fn()
+  const descriptorAppend = vi.fn()
+  const childSession = { events: [] as Array<{ type: string }>, append: descriptorAppend }
   const cancel = vi.fn()
   const whenIdle = vi.fn(async () => undefined)
   const create = vi.fn(async (options: { setup?: (ctx: unknown) => unknown; sessionId: string }) => {
     await options.setup?.(childContext)
-    return { agent: { id: options.sessionId, send, cancel, whenIdle }, dispose }
+    return { agent: { id: options.sessionId, options: { provider: 'deepseek', model: 'deepseek-chat' }, send, cancel, whenIdle, session: childSession }, dispose }
   })
   const resume = vi.fn(async (options: { setup?: (ctx: unknown) => unknown; resumeSessionId: string }) => {
     await options.setup?.(childContext)
-    return { agent: { id: options.resumeSessionId, send, cancel, whenIdle }, dispose }
+    return { agent: { id: options.resumeSessionId, options: { provider: 'deepseek', model: 'deepseek-chat' }, send, cancel, whenIdle, session: childSession }, dispose }
   })
   const tankCancel = vi.fn()
   const tankWhenIdle = vi.fn(async () => undefined)
@@ -57,7 +59,7 @@ function setup(workspaceRoot = '/workspace') {
   const manager = new PartyAgentManager(service, agents as never, presets as never)
   return {
     service, manager, agents, presets, create, resume, composeFrom, restrictions, sections, on, dispose,
-    send, cancel, whenIdle, tankCancel, tankWhenIdle, tankSend,
+    send, descriptorAppend, cancel, whenIdle, tankCancel, tankWhenIdle, tankSend,
   }
 }
 
@@ -78,6 +80,21 @@ describe('PartyAgentManager', () => {
     expect(restrictions.at(-1)?.allow).toEqual(expect.arrayContaining(['validation_manifest', 'validation_submit', 'battle_res']))
     expect(restrictions.at(-1)?.allow).not.toContain('party_finish')
     expect(sections.at(-1)?.text).toContain('Validator')
+  })
+
+  it('persists the official continuable subagent descriptor before child work', async () => {
+    const { manager, descriptorAppend } = setup()
+
+    await manager.ensureMember({ sessionId: 'tank' }, 'run', 'dps-1')
+
+    expect(descriptorAppend).toHaveBeenCalledWith('subagent/descriptor', expect.objectContaining({
+      version: 2,
+      mode: 'continuable',
+      provider: 'dungeon-party',
+      label: expect.stringContaining('dps-1'),
+      agentProvider: 'deepseek',
+      agentModel: 'deepseek-chat',
+    }))
   })
 
   it('proactively wakes the healer when validation starts', async () => {

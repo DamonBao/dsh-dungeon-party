@@ -126,6 +126,20 @@ describe('auditable member readiness', () => {
     expect(run.commanderRescueTickets[0]).toMatchObject({ targetSessionId: 'tank', status: 'issued' })
   })
 
+  it('lets the original Commander continue after a transient network wipe', () => {
+    const { service } = harness({ readinessCriticalSignalCount: 2 })
+    executingParty(service)
+    service.observeAgentTurnEnd('tank', 'error', ['network disconnected'])
+    service.observeAgentTurnEnd('tank', 'interrupted', ['driver stopped'])
+
+    const recovered = service.recoverRunAfterCommanderReturn(tank, 'run')
+
+    expect(recovered).toMatchObject({ controlState: 'normal', commanderLoad: 'normal' })
+    expect(recovered.slots.tank).toMatchObject({ lifeState: 'alive', readiness: 'healthy' })
+    expect(recovered.commanderRescueTickets[0]).toMatchObject({ status: 'completed' })
+    expect(recovered.commanderBattleResChargesRemaining).toBe(1)
+  })
+
   it('allows only the tank to direct healer self-maintenance', () => {
     const { service } = harness({ readinessWarningSignalCount: 1 })
     executingParty(service)

@@ -1,8 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { matchesGlob, relative, resolve } from 'node:path'
-import type { AgentHandle, AgentRegistry } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, AgentRegistry } from '@deepseek-ai/dsh-agent'
 import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 
 import {
@@ -48,6 +49,13 @@ export class PartyAgentManager {
     private readonly agents: AgentRegistry,
     private readonly presets: AgentPresets,
   ) {}
+
+  async restoreBoundParty(actor: Actor, runId: string): Promise<void> {
+    const run = this.service.getRunForActor(actor, runId)
+    for (const slot of ['dps-1', 'dps-2', 'dps-3', 'healer'] as const) {
+      if (run.slots[slot].currentSessionId) await this.ensureMember(actor, runId, slot)
+    }
+  }
 
   async prepareForPhase(actor: Actor, runId: string, phase: RunPhase): Promise<void> {
     if (phase === 'EXECUTING') {
@@ -281,6 +289,7 @@ export class PartyAgentManager {
         }
         this.handles.set(key, handle)
       }
+      this.ensureSubagentDescriptor(handle.agent, runId, request.targetSlot)
       try {
         if (!restored) {
           handle.agent.cancel(
@@ -339,6 +348,7 @@ export class PartyAgentManager {
         this.installExecutionGuard(agentCtx, runId, request.targetSlot)
       },
     })
+    this.ensureSubagentDescriptor(handle.agent, runId, request.targetSlot)
     try {
       this.service.completeBattleRes(actor, runId, resurrectionId, {
         success: true,
@@ -570,10 +580,24 @@ export class PartyAgentManager {
     this.dispatchedRecoveryIds.add(recoveryId)
   }
 
+  private ensureSubagentDescriptor(agent: Agent, runId: string, slot: ChildSlot): void {
+    if (agent.session.events.some((event) => event.type === 'subagent/descriptor')) return
+    agent.session.append('subagent/descriptor', snapshotSubagentDescriptor({
+      mode: 'continuable',
+      provider: 'dungeon-party',
+      label: `${runId} · ${slot}`,
+      ...agent.options.provider ? { agentProvider: agent.options.provider } : {},
+      ...agent.options.model ? { agentModel: agent.options.model } : {},
+      persona: rolePersonas[slot],
+      toolFilter: { allow: roleTools[slot] },
+    }))
+  }
+
   private async restoreMember(actor: Actor, runId: string, slot: ChildSlot, sessionId: string): Promise<string> {
     const key = keyFor(runId, slot)
     const live = this.agents.get(sessionId as SessionId)
     if (live) {
+      this.ensureSubagentDescriptor(live, runId, slot)
       this.handles.set(key, { agent: live, dispose: async () => undefined } as AgentHandle)
       return sessionId
     }
@@ -593,6 +617,7 @@ export class PartyAgentManager {
         this.installExecutionGuard(agentCtx, runId, slot)
       },
     })
+    this.ensureSubagentDescriptor(handle.agent, runId, slot)
     this.handles.set(key, handle)
     return String(handle.agent.id)
   }
@@ -624,6 +649,7 @@ export class PartyAgentManager {
         this.installExecutionGuard(agentCtx, runId, slot)
       },
     })
+    this.ensureSubagentDescriptor(handle.agent, runId, slot)
     try {
       this.service.bindMember(actor, runId, slot, String(handle.agent.id))
       this.handles.set(keyFor(runId, slot), handle)
