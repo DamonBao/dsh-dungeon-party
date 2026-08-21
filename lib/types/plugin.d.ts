@@ -6,6 +6,16 @@ import { PartyAgentManager } from './adapters/party-agent-manager.js';
 export interface DungeonPartyPluginConfig {
     dungeon?: Partial<DungeonConfig>;
     eventStore?: DungeonEventStore;
+    /**
+     * Explicit provider/model route for party child agents. The live model
+     * selection of the commander session is context-scoped and not exposed on
+     * the rc8 Agent API, so `{...tankAgent.options}` cannot capture a UI-side
+     * model switch; configure childRoute to pin the whole party to one route.
+     */
+    childRoute?: {
+        provider?: string;
+        model?: string;
+    };
 }
 declare module '@deepseek-ai/cordis' {
     interface Context {
@@ -21,6 +31,13 @@ export declare function applyDungeonProjection(state: DungeonRun | null, event: 
 export declare const name = "dungeon-party";
 export declare const inject: string[];
 export declare const Config: z<Schemastery.ObjectS<{
+    childRoute: z<Schemastery.ObjectS<{
+        provider: z<string, string>;
+        model: z<string, string>;
+    }>, Schemastery.ObjectT<{
+        provider: z<string, string>;
+        model: z<string, string>;
+    }>>;
     dungeon: z<Schemastery.ObjectS<{
         scopeEnforcementMode: z<"auto" | "telemetry" | "aggregate" | "serial", "auto" | "telemetry" | "aggregate" | "serial">;
         strictPerAgentWriteScopes: z<boolean, boolean>;
@@ -69,6 +86,13 @@ export declare const Config: z<Schemastery.ObjectS<{
         validationRequired: z<boolean, boolean>;
     }>>;
 }>, Schemastery.ObjectT<{
+    childRoute: z<Schemastery.ObjectS<{
+        provider: z<string, string>;
+        model: z<string, string>;
+    }>, Schemastery.ObjectT<{
+        provider: z<string, string>;
+        model: z<string, string>;
+    }>>;
     dungeon: z<Schemastery.ObjectS<{
         scopeEnforcementMode: z<"auto" | "telemetry" | "aggregate" | "serial", "auto" | "telemetry" | "aggregate" | "serial">;
         strictPerAgentWriteScopes: z<boolean, boolean>;
@@ -120,6 +144,13 @@ export declare const Config: z<Schemastery.ObjectS<{
 export declare class DungeonPartyService extends Service {
     static inject: string[];
     static Config: z<Schemastery.ObjectS<{
+        childRoute: z<Schemastery.ObjectS<{
+            provider: z<string, string>;
+            model: z<string, string>;
+        }>, Schemastery.ObjectT<{
+            provider: z<string, string>;
+            model: z<string, string>;
+        }>>;
         dungeon: z<Schemastery.ObjectS<{
             scopeEnforcementMode: z<"auto" | "telemetry" | "aggregate" | "serial", "auto" | "telemetry" | "aggregate" | "serial">;
             strictPerAgentWriteScopes: z<boolean, boolean>;
@@ -168,6 +199,13 @@ export declare class DungeonPartyService extends Service {
             validationRequired: z<boolean, boolean>;
         }>>;
     }>, Schemastery.ObjectT<{
+        childRoute: z<Schemastery.ObjectS<{
+            provider: z<string, string>;
+            model: z<string, string>;
+        }>, Schemastery.ObjectT<{
+            provider: z<string, string>;
+            model: z<string, string>;
+        }>>;
         dungeon: z<Schemastery.ObjectS<{
             scopeEnforcementMode: z<"auto" | "telemetry" | "aggregate" | "serial", "auto" | "telemetry" | "aggregate" | "serial">;
             strictPerAgentWriteScopes: z<boolean, boolean>;

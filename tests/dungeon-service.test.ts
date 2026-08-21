@@ -25,9 +25,9 @@ function task(overrides: Partial<WorkOrder> = {}): WorkOrder {
       { id: 'task-1:works', description: 'Core behavior works', required: true },
     ],
     readScopes: ['src/**'],
-    writeScopes: ['src/core/**'],
+    writeScopes: ['src/service/**'],
     blockedBy: [],
-    expectedArtifacts: ['src/core/index.ts'],
+    expectedArtifacts: ['src/service/dungeon-service.ts'],
     priority: 'high',
     required: true,
     version: 1,
@@ -60,7 +60,7 @@ function createReadyRun(service: DungeonService) {
   const run = service.startRun({
     runId: 'run-1',
     objective: 'Build a reliable core',
-    workspaceRoot: '/workspace',
+    workspaceRoot: process.cwd(),
     workspaceFingerprint: 'fingerprint-v1',
     tankSessionId: tank.sessionId,
   })
@@ -79,7 +79,7 @@ describe('DungeonService', () => {
     const run = service.startRun({
       runId: 'run-1',
       objective: 'Build a reliable core',
-      workspaceRoot: '/workspace',
+      workspaceRoot: process.cwd(),
       workspaceFingerprint: 'fingerprint-v1',
       tankSessionId: tank.sessionId,
     })
@@ -96,12 +96,12 @@ describe('DungeonService', () => {
     ])
     expect(persisted.map((event) => event.sequence)).toEqual([1, 2])
     expect(service.startRun({
-      runId: 'run-1', objective: 'Build a reliable core', workspaceRoot: '/workspace',
+      runId: 'run-1', objective: 'Build a reliable core', workspaceRoot: process.cwd(),
       workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
     })).toEqual(run)
     expect(persisted).toHaveLength(2)
     expect(() => service.startRun({
-      runId: 'run-1', objective: 'Different', workspaceRoot: '/workspace',
+      runId: 'run-1', objective: 'Different', workspaceRoot: process.cwd(),
       workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
     })).toThrowError(expect.objectContaining({ code: 'IDEMPOTENCY_CONFLICT' }))
 
@@ -112,7 +112,7 @@ describe('DungeonService', () => {
   it('waits from an event cursor and returns only newer durable events', async () => {
     const { service } = setup()
     const run = service.startRun({
-      runId: 'run-1', objective: 'Build', workspaceRoot: '/workspace',
+      runId: 'run-1', objective: 'Build', workspaceRoot: process.cwd(),
       workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
     })
 
@@ -127,7 +127,7 @@ describe('DungeonService', () => {
     const run = service.startRun({
       runId: 'run-1',
       objective: 'Build a reliable core',
-      workspaceRoot: '/workspace',
+      workspaceRoot: process.cwd(),
       workspaceFingerprint: 'fingerprint-v1',
       tankSessionId: tank.sessionId,
     })
@@ -142,7 +142,7 @@ describe('DungeonService', () => {
     const run = service.startRun({
       runId: 'run-1',
       objective: 'Build a reliable core',
-      workspaceRoot: '/workspace',
+      workspaceRoot: process.cwd(),
       workspaceFingerprint: 'fingerprint-v1',
       tankSessionId: tank.sessionId,
     })
@@ -162,7 +162,7 @@ describe('DungeonService', () => {
           acceptanceCriteria: [
             { id: 'task-2:works', description: 'Second task works', required: true },
           ],
-          writeScopes: ['src/core/parser/**'],
+          writeScopes: ['src/service/parser/**'],
         }),
       ),
     ).toThrowError(expect.objectContaining({ code: 'WRITE_SCOPE_CONFLICT' }))
@@ -171,7 +171,7 @@ describe('DungeonService', () => {
   it('allows each workspace-global command to belong to only one work order', () => {
     const { service } = setup()
     const run = service.startRun({
-      runId: 'run-1', objective: 'Build', workspaceRoot: '/workspace',
+      runId: 'run-1', objective: 'Build', workspaceRoot: process.cwd(),
       workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
     })
     service.changePhase(tank, run.id, 'PLANNING')
@@ -188,7 +188,7 @@ describe('DungeonService', () => {
   it('allows overlapping write scopes when the dependency DAG makes tasks serial', () => {
     const { service } = setup()
     const run = service.startRun({
-      runId: 'run-1', objective: 'Build', workspaceRoot: '/workspace',
+      runId: 'run-1', objective: 'Build', workspaceRoot: process.cwd(),
       workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
     })
     service.changePhase(tank, run.id, 'PLANNING')
@@ -201,14 +201,14 @@ describe('DungeonService', () => {
       id: 'task-2',
       blockedBy: ['task-1'],
       acceptanceCriteria: [{ id: 'task-2:works', description: 'Second works', required: true }],
-      writeScopes: ['src/core/parser/**'],
+      writeScopes: ['src/service/parser/**'],
     }))).not.toThrow()
   })
 
   it('serializes write leases when strict scope enforcement has no telemetry', () => {
     const { service } = setup({ strictPerAgentWriteScopes: true })
     const run = service.startRun({
-      runId: 'run-1', objective: 'Build', workspaceRoot: '/workspace',
+      runId: 'run-1', objective: 'Build', workspaceRoot: process.cwd(),
       workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
     })
     service.bindMember(tank, run.id, 'healer', healer.sessionId)
@@ -233,7 +233,7 @@ describe('DungeonService', () => {
   it('enforces maxConcurrentDps when granting leases', () => {
     const { service } = setup({ maxConcurrentDps: 1 })
     const run = service.startRun({
-      runId: 'run-1', objective: 'Build', workspaceRoot: '/workspace',
+      runId: 'run-1', objective: 'Build', workspaceRoot: process.cwd(),
       workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
     })
     service.bindMember(tank, run.id, 'healer', healer.sessionId)
@@ -260,7 +260,7 @@ describe('DungeonService', () => {
     const run = service.startRun({
       runId: 'run-1',
       objective: 'Build a reliable core',
-      workspaceRoot: '/workspace',
+      workspaceRoot: process.cwd(),
       workspaceFingerprint: 'fingerprint-v1',
       tankSessionId: tank.sessionId,
     })
@@ -290,7 +290,7 @@ describe('DungeonService', () => {
         generation: 1,
         status: 'completed',
         summary: 'Done',
-        changedFiles: ['src/core/index.ts'],
+        changedFiles: ['src/service/dungeon-service.ts'],
         evidence: ['unit tests passed'],
         commandsRun: [{ command: 'pnpm test', exitCode: 0, summary: 'passed' }],
         risks: [],
@@ -309,7 +309,7 @@ describe('DungeonService', () => {
         generation: 1,
         status: 'completed',
         summary: 'Done',
-        changedFiles: ['src/core/index.ts'],
+        changedFiles: ['src/service/dungeon-service.ts'],
         evidence: ['unit tests passed'],
         commandsRun: [],
         risks: [],
@@ -334,7 +334,7 @@ describe('DungeonService', () => {
     const report = {
       taskId: 'task-1', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
       slot: 'dps-1' as const, generation: 1, status: 'completed' as const, summary: 'Done',
-      changedFiles: ['src/core/index.ts'], evidence: ['unit tests passed'], commandsRun: [], risks: [], remainingWork: [],
+      changedFiles: ['src/service/dungeon-service.ts'], evidence: ['unit tests passed'], commandsRun: [], risks: [], remainingWork: [],
     }
     service.submitExecution(dps1, run.id, report)
     service.submitExecution(dps1, run.id, report)
@@ -358,7 +358,7 @@ describe('DungeonService', () => {
       generation: 1,
       status: 'completed',
       summary: 'Done',
-      changedFiles: ['src/core/index.ts'],
+      changedFiles: ['src/service/dungeon-service.ts'],
       evidence: ['unit tests passed'],
       commandsRun: [{ command: 'pnpm test', exitCode: 0, summary: 'passed' }],
       risks: [],
@@ -472,6 +472,58 @@ describe('DungeonService', () => {
         summary: 'Pass despite issue',
       }),
     ).toThrowError(expect.objectContaining({ code: 'PASS_HAS_BLOCKING_FINDINGS' }))
+  })
+})
+
+describe('post-append state returns (reducer purity regression)', () => {
+  it('createTask returns the created task record', () => {
+    const { service } = setup()
+    service.startRun({
+      runId: 'run-1', objective: 'o', workspaceRoot: process.cwd(),
+      workspaceFingerprint: 'v1', tankSessionId: tank.sessionId,
+    })
+    service.changePhase(tank, 'run-1', 'PLANNING')
+    const created = service.createTask(tank, 'run-1', task())
+    expect(created).toMatchObject({ status: 'pending', repairRound: 0 })
+    expect(created?.workOrder.id).toBe('task-1')
+  })
+
+  it('changePhase returns the run in its new phase', () => {
+    const { service } = setup()
+    service.startRun({
+      runId: 'run-1', objective: 'o', workspaceRoot: process.cwd(),
+      workspaceFingerprint: 'v1', tankSessionId: tank.sessionId,
+    })
+    const updated = service.changePhase(tank, 'run-1', 'PLANNING')
+    expect(updated.phase).toBe('PLANNING')
+  })
+
+  it('bindMember returns the run with the newly bound slot', () => {
+    const { service } = setup()
+    service.startRun({
+      runId: 'run-1', objective: 'o', workspaceRoot: process.cwd(),
+      workspaceFingerprint: 'v1', tankSessionId: tank.sessionId,
+    })
+    const bound = service.bindMember(tank, 'run-1', 'healer', healer.sessionId)
+    expect(bound.slots.healer.currentSessionId).toBe(healer.sessionId)
+    expect(bound.slots.healer.generation).toBe(1)
+  })
+
+  it('registerTaskTurn and submitCheckpoint return post-event task state', () => {
+    const { service } = setup()
+    createReadyRun(service)
+    service.assignTask(tank, 'run-1', 'task-1', 'dps-1')
+    const lease = service.claimTask(dps1, 'run-1', 'task-1')
+    const withTurn = service.registerTaskTurn('run-1', 'task-1', 'turn-7')
+    expect(withTurn.currentTurnId).toBe('turn-7')
+    const submitted = service.submitCheckpoint(dps1, 'run-1', {
+      checkpointId: 'cp-1', taskId: 'task-1', taskVersion: 1,
+      leaseId: lease.leaseId, leaseVersion: 1, slot: 'dps-1',
+      completed: ['step'], nextSteps: ['next'], evidenceDelta: ['evidence'], blockers: [],
+      workspaceFingerprint: 'fingerprint-v1',
+    })
+    expect(submitted.activeLease?.version).toBe(2)
+    expect(submitted.lastCheckpoint?.checkpointId).toBe('cp-1')
   })
 })
 

@@ -240,6 +240,7 @@ export function registerDungeonTools(
   service: DungeonService,
   agentManager?: PartyAgentManager,
 ): () => void {
+  let validationCounter = 0
   const disposers = [
     ctx.tools.register(defineTool({
       name: 'party_start',
@@ -666,17 +667,44 @@ export function registerDungeonTools(
     })),
     ctx.tools.register(defineTool({
       name: 'member_checkpoint',
-      description: 'As the owning DPS, submit a lease-bound progress checkpoint with evidence delta.',
+      description: 'As the owning DPS, submit a lease-bound progress checkpoint with evidence delta. Technical fields (lease identity, slot, versions, fingerprint) are host-derived from your active lease; you only provide taskId and the semantic lists.',
       parameters: {
         runId: { type: 'string', required: true },
-        checkpoint: { type: 'json', required: true },
+        taskId: { type: 'string', required: true },
+        completed: { type: 'array', items: { type: 'string' }, description: 'Completed steps since the last checkpoint.' },
+        nextSteps: { type: 'array', items: { type: 'string' } },
+        evidenceDelta: { type: 'array', items: { type: 'string' }, description: 'New evidence observed since the last checkpoint.' },
+        blockers: { type: 'array', items: { type: 'string' } },
       },
       output,
       async execute(args, exec) {
-        const checkpoint = args.checkpoint as unknown as DpsCheckpoint
+        const caller = actor(exec)
+        const run = service.getRunForActor(caller, args.runId)
+        const task = run.tasks[args.taskId]
+        if (!task) throw new DungeonError('TASK_NOT_FOUND', `Task ${args.taskId} does not exist`)
+        const lease = task.activeLease
+        if (!lease) throw new DungeonError('LEASE_REQUIRED', `Task ${args.taskId} has no active lease; call work_claim first`)
+        const slot = (['dps-1', 'dps-2', 'dps-3'] as const)
+          .find((candidate) => run.slots[candidate].currentSessionId === caller.sessionId)
+        if (!slot) throw new DungeonError('FORBIDDEN', 'Only a bound DPS can submit checkpoints')
+        const checkpoint: DpsCheckpoint = {
+          checkpointId: `cp-${lease.leaseId}-v${lease.version}`,
+          taskId: args.taskId,
+          taskVersion: task.workOrder.version,
+          leaseId: lease.leaseId,
+          leaseVersion: lease.version,
+          slot,
+          completed: stringList(args.completed, 'completed'),
+          nextSteps: stringList(args.nextSteps, 'nextSteps'),
+          evidenceDelta: stringList(args.evidenceDelta, 'evidenceDelta'),
+          blockers: stringList(args.blockers, 'blockers'),
+          workspaceFingerprint: run.workspaceFingerprint,
+        }
         const turnId = currentTurnId(exec)
-        if (turnId) service.registerTaskTurn(args.runId, checkpoint.taskId, turnId)
-        return json(service.submitCheckpoint(actor(exec), args.runId, checkpoint))
+        if (turnId) service.registerTaskTurn(args.runId, args.taskId, turnId)
+        const submitted = service.submitCheckpoint(caller, args.runId, checkpoint)
+        agentManager?.refreshLeaseAudit(args.runId, args.taskId)
+        return json(submitted)
       },
     })),
     ctx.tools.register(defineTool({
@@ -737,14 +765,70 @@ export function registerDungeonTools(
     })),
     ctx.tools.register(defineTool({
       name: 'validation_submit',
-      description: 'As the bound healer, submit a structured report for the current validation manifest.',
+      description: 'As the bound healer, submit a structured report for the current validation manifest. Manifest version, task-set version, and workspace fingerprint are host-derived from the current manifest; provide only the verdict, per-criterion checks, findings, and summary.',
       parameters: {
         runId: { type: 'string', required: true },
-        report: { type: 'json', required: true },
+        verdict: { type: 'string', enum: ['pass', 'fail', 'blocked'], required: true },
+        summary: { type: 'string', required: true },
+        checks: {
+          type: 'array', required: true,
+          items: {
+            type: 'object', additionalProperties: false,
+            properties: {
+              criterionId: { type: 'string', required: true },
+              status: { type: 'string', enum: ['pass', 'fail', 'blocked', 'not-applicable'], required: true },
+              evidence: { type: 'array', items: { type: 'string' } },
+              notApplicableReason: { type: 'string' },
+            },
+          },
+        },
+        findings: {
+          type: 'array', required: true,
+          items: {
+            type: 'object', additionalProperties: false,
+            properties: {
+              id: { type: 'string', required: true },
+              severity: { type: 'string', enum: ['critical', 'major', 'minor'], required: true },
+              ownerTaskId: { type: 'string' },
+              title: { type: 'string', required: true },
+              evidence: { type: 'string', required: true },
+              remediation: { type: 'string', required: true },
+            },
+          },
+        },
+        validationId: { type: 'string', description: 'Optional idempotency label; host generates one when omitted.' },
       },
       output,
       async execute(args, exec) {
-        return json(service.submitValidation(actor(exec), args.runId, args.report as unknown as ValidationSubmission))
+        const caller = actor(exec)
+        const run = service.getRunForActor(caller, args.runId)
+        const manifest = run.manifests.at(-1)
+        if (!manifest) throw new DungeonError('MANIFEST_REQUIRED', 'No validation manifest exists; the tank must create one during VALIDATING')
+        const submission: ValidationSubmission = {
+          validationId: typeof args.validationId === 'string' && args.validationId.trim()
+            ? args.validationId.trim()
+            : `validation-${manifest.manifestVersion}-${++validationCounter}`,
+          verdict: args.verdict,
+          taskSetVersion: manifest.taskSetVersion,
+          manifestVersion: manifest.manifestVersion,
+          workspaceFingerprint: manifest.workspaceFingerprint,
+          checks: (args.checks as Array<Record<string, unknown>>).map((check) => ({
+            criterionId: String(check.criterionId),
+            status: check.status as 'pass' | 'fail' | 'blocked' | 'not-applicable',
+            evidence: stringList(check.evidence, 'checks[].evidence'),
+            ...(typeof check.notApplicableReason === 'string' ? { notApplicableReason: check.notApplicableReason } : {}),
+          })),
+          findings: (args.findings as Array<Record<string, unknown>>).map((finding) => ({
+            id: String(finding.id),
+            severity: finding.severity as 'critical' | 'major' | 'minor',
+            ...(typeof finding.ownerTaskId === 'string' ? { ownerTaskId: finding.ownerTaskId } : {}),
+            title: String(finding.title),
+            evidence: String(finding.evidence),
+            remediation: String(finding.remediation),
+          })),
+          summary: args.summary,
+        }
+        return json(service.submitValidation(caller, args.runId, submission))
       },
     })),
     ctx.tools.register(defineTool({

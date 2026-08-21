@@ -14,7 +14,16 @@ function normalizeScope(scope: string): string {
 }
 
 function isIgnored(path: string, scopes: string[]): boolean {
-  return scopes.some((scope) => path === scope || matchesGlob(path, scope))
+  return scopes.some((scope) => {
+    // Directory excludes use literal prefix matching so hidden children
+    // (node_modules/.vite, node_modules/.bin, …) are covered — path.glob's
+    // `**` does not cross dot-directories.
+    if (scope.endsWith('/**')) {
+      const prefix = scope.slice(0, -3)
+      if (path === prefix || path.startsWith(`${prefix}/`)) return true
+    }
+    return matchesGlob(path, scope)
+  })
 }
 
 /** Capture file and symlink content digests without following workspace symlinks. */

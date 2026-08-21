@@ -28,7 +28,7 @@ const partyIdentity: Record<PartySlot, {
 }
 
 const phaseName: Record<string, string> = {
-  FORMING: '集结队伍', PLANNING: '战前部署', EXECUTING: '首领交战', VALIDATING: '战利品检定',
+  FORMING: '集结队伍', PLANNING: '战前部署', PLAN_REVIEW: '作战复核', EXECUTING: '首领交战', VALIDATING: '战利品检定',
   REPAIR: '战地修整', COMPLETED: '秘境征服', FAILED: '团灭', CANCELLED: '撤离秘境',
 }
 
@@ -59,15 +59,28 @@ const styles = `
 
 type Tab = 'party' | 'quests' | 'chronicle' | 'actions'
 
+/** Percent bars are keyed by the real domain states so phantom keys fail loudly. */
+const lifePercentMap: Record<string, number> = {
+  alive: 100,
+  down: 0,
+  'permanently-dead': 0,
+  'resurrection-requested': 20,
+  resurrecting: 46,
+}
+const activityPercentMap: Record<string, number> = {
+  idle: 34,
+  queued: 56,
+  running: 88,
+  waiting: 56,
+  stopped: 12,
+}
+
 function lifePercent(lifeState: string | undefined): number {
-  return lifeState === 'down' || lifeState === 'replaced' ? 0 : lifeState === 'recovering' ? 46 : 100
+  return lifePercentMap[lifeState ?? 'alive'] ?? 100
 }
 
 function activityPercent(activityState: string | undefined): number {
-  if (activityState === 'working') return 88
-  if (activityState === 'waiting') return 56
-  if (activityState === 'stalled') return 18
-  return 34
+  return activityPercentMap[activityState ?? 'idle'] ?? 34
 }
 
 function TaskRow({ task }: { task: TaskRecord }) {
@@ -217,7 +230,10 @@ export function DungeonPartyOverlay({ useSessions, requestAction }: DungeonParty
           <div className="dp-roster">{slots.map((slot) => {
             const member = run.slots[slot]
             const identity = partyIdentity[slot]
-            const currentTask = tasks.find((task) => task.ownerSlot === slot && ['assigned', 'running', 'submitted'].includes(task.status))
+            const currentTask = tasks.find((task) => task.ownerSlot === slot && ['ready', 'running'].includes(task.status))
+            const healerActivity = slot === 'healer' && run.phase === 'VALIDATING'
+              ? `正在检定 ${run.manifests.at(-1)?.criteria.length ?? 0} 项准则 · 已提交 ${run.validationReports.length} 份报告`
+              : undefined
             return <article className={`dp-member ${identity.className}`} data-life={member.lifeState} key={slot}>
               <span className="dp-avatar" aria-hidden>{identity.glyph}</span>
               <div className="dp-member-main">
@@ -229,7 +245,7 @@ export function DungeonPartyOverlay({ useSessions, requestAction }: DungeonParty
                 </div>
               </div>
               <div className="dp-member-state"><div className="dp-role">{identity.role}</div><div className="dp-state">{member.lifeState ?? 'alive'} · {member.readiness ?? 'ready'}</div></div>
-              <div className="dp-current">{currentTask?.workOrder.title ?? (member.currentSessionId ? '等待任务指令' : '尚未召集')}</div>
+              <div className="dp-current">{healerActivity ?? currentTask?.workOrder.title ?? (member.currentSessionId ? '等待任务指令' : '尚未召集')}</div>
             </article>
           })}</div>
         </> : null}

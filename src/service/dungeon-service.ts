@@ -1,4 +1,6 @@
 import { matchesGlob } from 'node:path'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 
 export type PartySlot = 'tank' | 'dps-1' | 'dps-2' | 'dps-3' | 'healer'
 export type DpsSlot = Extract<PartySlot, `dps-${number}`>
@@ -412,7 +414,9 @@ export function resolveDungeonConfig(input: Partial<DungeonConfig>): DungeonConf
   const config: DungeonConfig = {
     ...defaultDungeonConfig,
     ...input,
-    fingerprintIgnoreScopes: [...(input.fingerprintIgnoreScopes ?? defaultDungeonConfig.fingerprintIgnoreScopes)],
+    fingerprintIgnoreScopes: input.fingerprintIgnoreScopes?.length
+      ? [...input.fingerprintIgnoreScopes]
+      : [...defaultDungeonConfig.fingerprintIgnoreScopes],
   }
   assert(
     ['auto', 'telemetry', 'aggregate', 'serial'].includes(config.scopeEnforcementMode),
@@ -573,6 +577,7 @@ export class DungeonService {
   private readonly clock: () => string
   private readonly config: DungeonConfig
   private readonly waiters = new Map<string, Set<() => void>>()
+  private readonly sequenceCounters = new Map<string, number>()
 
   constructor(options: DungeonServiceOptions) {
     this.eventStore = options.eventStore
@@ -658,6 +663,7 @@ export class DungeonService {
     }
     assert(run, 'RUN_NOT_FOUND', `Run ${runId} was not found`)
     this.runs.set(runId, run)
+    this.sequenceCounters.set(runId, expectedSequence)
     return clone(run)
   }
 
@@ -667,13 +673,13 @@ export class DungeonService {
     const binding = run.slots[slot]
     assert(!binding.currentSessionId, 'SLOT_ALREADY_BOUND', `Slot ${slot} is already bound`)
     assert(!this.findSlot(run, sessionId), 'SESSION_ALREADY_BOUND', 'Session is already a party member')
-    this.append(run, 'dungeon/member-bound', {
+    const updated = this.append(run, 'dungeon/member-bound', {
       slot,
       sessionId,
       generation: binding.generation + 1,
       boundAt: this.clock(),
     }, actor.sessionId)
-    return clone(run)
+    return clone(updated)
   }
 
   changePhase(actor: Actor, runId: string, nextPhase: RunPhase): DungeonRun {
@@ -687,8 +693,8 @@ export class DungeonService {
     if (nextPhase === 'VALIDATING') {
       this.assertRequiredTasksComplete(run)
     }
-    this.append(run, 'dungeon/phase-changed', { previousPhase: run.phase, phase: nextPhase }, actor.sessionId)
-    return clone(run)
+    const updated = this.append(run, 'dungeon/phase-changed', { previousPhase: run.phase, phase: nextPhase }, actor.sessionId)
+    return clone(updated)
   }
 
   createTask(actor: Actor, runId: string, workOrder: WorkOrder): TaskRecord {
@@ -749,8 +755,8 @@ export class DungeonService {
       assert(dependency !== workOrder.id, 'CYCLIC_DEPENDENCY', 'A task cannot block itself')
       assert(run.tasks[dependency], 'UNKNOWN_DEPENDENCY', `Unknown dependency ${dependency}`)
     }
-    this.append(run, 'dungeon/task-created', { workOrder: clone(workOrder), taskSetVersion: run.taskSetVersion + 1 }, actor.sessionId)
-    return clone(run.tasks[workOrder.id]!)
+    const updated = this.append(run, 'dungeon/task-created', { workOrder: clone(workOrder), taskSetVersion: run.taskSetVersion + 1 }, actor.sessionId)
+    return clone(updated.tasks[workOrder.id]!)
   }
 
   preflightTaskAssignment(actor: Actor, runId: string, taskId: string, slot: DpsSlot): TaskRecord {
@@ -773,18 +779,22 @@ export class DungeonService {
     if (task.ownerSlot === slot && task.status === 'ready') return task
     const run = this.requireRun(runId)
     assert(run.slots[slot].currentSessionId, 'UNBOUND_SLOT', `Slot ${slot} is not bound`)
-    this.append(run, 'dungeon/task-assigned', { taskId, ownerSlot: slot }, actor.sessionId)
-    return clone(run.tasks[taskId]!)
+    const updated = this.append(run, 'dungeon/task-assigned', { taskId, ownerSlot: slot }, actor.sessionId)
+    return clone(updated.tasks[taskId]!)
   }
 
   claimTask(actor: Actor, runId: string, taskId: string): TaskLease {
     const run = this.requireRun(runId)
-    assert(run.phase === 'EXECUTING', 'INVALID_PHASE', 'Tasks can only be claimed during execution')
+    assert(
+      run.phase === 'EXECUTING' || run.phase === 'REPAIR',
+      'INVALID_PHASE',
+      'Tasks can only be claimed during execution or repair',
+    )
     assert(run.controlState === 'normal', 'DISPATCH_BLOCKED', 'Run dispatch is not normal')
     const actorSlot = this.requireDps(run, actor.sessionId)
     const task = this.requireTask(run, taskId)
     assert(task.ownerSlot === actorSlot, 'FORBIDDEN', 'Task is not assigned to this DPS slot')
-    assert(task.status === 'ready', 'TASK_NOT_CLAIMABLE', `Task ${taskId} is not ready`)
+    assert(task.status === 'ready', 'TASK_NOT_CLAIMABLE', `Task ${taskId} is not ready (current status: ${task.status}${task.activeLease ? `; you already hold lease ${task.activeLease.leaseId}, submit via work_submit` : ''})`)
     assert(!task.activeLease, 'LEASE_EXISTS', 'Task already has an active lease')
     assert(run.slots.healer.currentSessionId, 'HEALER_REQUIRED', 'A healer must be bound before a write lease')
     const activeDps = new Set(Object.values(run.tasks).flatMap((candidate) =>
@@ -875,21 +885,27 @@ export class DungeonService {
         `Changed file ${changedFile} is outside the task write scopes`,
       )
     }
+    if (report.status === 'completed') {
+      for (const changedFile of report.changedFiles) {
+        const absolutePath = join(run.workspaceRoot, changedFile)
+        assert(existsSync(absolutePath), 'ARTIFACT_NOT_FOUND', `Changed file does not exist on disk: ${changedFile}`)
+      }
+    }
     this.append(run, 'dungeon/task-submitted', { report: clone(report) }, actor.sessionId)
-    return clone(run.tasks[report.taskId]!)
+    return clone(this.requireRun(runId).tasks[report.taskId]!)
   }
 
   markMemberDown(runId: string, slot: DpsSlot, reason: string): DungeonRun {
-    const run = this.requireRun(runId)
+    let run = this.requireRun(runId)
     this.assertMutable(run)
     assert(typeof reason === 'string' && reason.trim(), 'FAILURE_REASON_REQUIRED', 'A member failure reason is required')
     assert(run.slots[slot].currentSessionId, 'UNBOUND_SLOT', `Slot ${slot} is not bound`)
     if (run.slots[slot].lifeState !== 'down') {
-      this.append(run, 'dungeon/member-down', { slot, reason })
+      run = this.append(run, 'dungeon/member-down', { slot, reason })
     }
     for (const task of Object.values(run.tasks)) {
       if (task.ownerSlot === slot && task.activeLease) {
-        this.append(run, 'dungeon/task-lease-revoked', {
+        run = this.append(run, 'dungeon/task-lease-revoked', {
           taskId: task.workOrder.id,
           leaseId: task.activeLease.leaseId,
           leaseVersion: task.activeLease.version,
@@ -960,8 +976,8 @@ export class DungeonService {
     assert(request, 'RESURRECTION_NOT_FOUND', 'Battle resurrection request was not found')
     assert(request.status === 'issued', 'RESURRECTION_ALREADY_CONSUMED', 'Battle resurrection request is no longer available')
     assert(Date.parse(this.clock()) <= Date.parse(request.expiresAt), 'RESURRECTION_EXPIRED', 'Battle resurrection request expired')
-    this.append(run, 'dungeon/resurrection-started', { resurrectionId }, actor.sessionId)
-    return clone(run.resurrectionRequests.find((item) => item.resurrectionId === resurrectionId)!)
+    const updated = this.append(run, 'dungeon/resurrection-started', { resurrectionId }, actor.sessionId)
+    return clone(updated.resurrectionRequests.find((item) => item.resurrectionId === resurrectionId)!)
   }
 
   completeBattleRes(
@@ -995,7 +1011,7 @@ export class DungeonService {
       assert(outcome.sessionId !== request.targetSessionId, 'SESSION_MISMATCH', 'Replacement must use a new DPS Session')
       assert(binding.generation < this.config.maxGenerationsPerSlot, 'MAX_GENERATION_REACHED', 'DPS slot reached its maximum generation')
     }
-    this.append(run, outcome.success && outcome.mode === 'replace' ? 'dungeon/member-rebound' : outcome.success ? 'dungeon/resurrection-completed' : 'dungeon/resurrection-failed', {
+    const updated = this.append(run, outcome.success && outcome.mode === 'replace' ? 'dungeon/member-rebound' : outcome.success ? 'dungeon/resurrection-completed' : 'dungeon/resurrection-failed', {
       resurrectionId,
       slot: request.targetSlot,
       previousSessionId: request.targetSessionId,
@@ -1004,7 +1020,7 @@ export class DungeonService {
       completedAt: this.clock(),
       chargeOnFailure: this.config.chargeOnFailedResurrection,
     }, actor.sessionId)
-    return clone(run.resurrectionRequests.find((item) => item.resurrectionId === resurrectionId)!)
+    return clone(updated.resurrectionRequests.find((item) => item.resurrectionId === resurrectionId)!)
   }
 
   markCommanderUnavailable(runId: string, reason: string): CommanderRescueTicket {
@@ -1015,10 +1031,10 @@ export class DungeonService {
     const healerSessionId = run.slots.healer.currentSessionId
     assert(tankSessionId && healerSessionId, 'PARTY_NOT_RECOVERABLE', 'Tank and healer must both be bound')
     assert(run.commanderBattleResChargesRemaining > 0, 'NO_COMMANDER_RES_CHARGES', 'No commander resurrection charges remain')
-    this.append(run, 'dungeon/member-down', { slot: 'tank', reason })
-    this.append(run, 'dungeon/dispatch-paused', { reason: 'commander-unavailable' })
-    const checkpoint = this.buildCommanderCheckpoint(run, [])
-    this.append(run, 'dungeon/commander-checkpointed', { checkpoint })
+    let current = this.append(run, 'dungeon/member-down', { slot: 'tank', reason })
+    current = this.append(current, 'dungeon/dispatch-paused', { reason: 'commander-unavailable' })
+    const checkpoint = this.buildCommanderCheckpoint(current, [])
+    current = this.append(current, 'dungeon/commander-checkpointed', { checkpoint })
     const issuedAt = this.clock()
     const ticket: CommanderRescueTicket = {
       ticketId: this.idGenerator(),
@@ -1032,7 +1048,7 @@ export class DungeonService {
       expiresAt: new Date(Date.parse(issuedAt) + this.config.commanderRescueTicketTtlMs).toISOString(),
       version: 1,
     }
-    this.append(run, 'dungeon/commander-rescue-ticket-issued', { ticket })
+    this.append(current, 'dungeon/commander-rescue-ticket-issued', { ticket })
     return clone(ticket)
   }
 
@@ -1043,11 +1059,11 @@ export class DungeonService {
     assert(ticket, 'TICKET_NOT_FOUND', 'Commander rescue ticket was not found')
     assert(ticket.status === 'issued', 'TICKET_ALREADY_CONSUMED', 'Commander rescue ticket is no longer available')
     assert(Date.parse(this.clock()) <= Date.parse(ticket.expiresAt), 'TICKET_EXPIRED', 'Commander rescue ticket expired')
-    this.append(run, 'dungeon/commander-rescue-ticket-consumed', {
+    const updated = this.append(run, 'dungeon/commander-rescue-ticket-consumed', {
       ticketId,
       recoveryExpiresAt: new Date(Date.parse(this.clock()) + this.config.commanderResurrectionTimeoutMs).toISOString(),
     }, actor.sessionId)
-    return clone(run.commanderRescueTickets.find((item) => item.ticketId === ticketId)!)
+    return clone(updated.commanderRescueTickets.find((item) => item.ticketId === ticketId)!)
   }
 
   expireCommanderRescueTickets(runId: string): DungeonRun {
@@ -1056,7 +1072,7 @@ export class DungeonService {
     for (const ticket of run.commanderRescueTickets.filter((item) => item.status === 'issued' && now > Date.parse(item.expiresAt))) {
       this.append(run, 'dungeon/commander-rescue-ticket-expired', { ticketId: ticket.ticketId })
     }
-    return clone(run)
+    return clone(this.requireRun(runId))
   }
 
   sweepExpiredState(runId: string): DungeonRun {
@@ -1108,7 +1124,7 @@ export class DungeonService {
         reason: 'expired',
       })
     }
-    return clone(run)
+    return clone(this.requireRun(runId))
   }
 
   completeCommanderResurrection(
@@ -1130,11 +1146,11 @@ export class DungeonService {
       throw new DungeonError('TICKET_EXPIRED', 'Commander rescue ticket expired before completion')
     }
     assert(outcome.sessionId === ticket.targetSessionId, 'COMMANDER_REPLACE_FORBIDDEN', 'Commander resurrection may only restore the original Lead Session')
-    this.append(run, outcome.success ? 'dungeon/commander-resurrection-completed' : 'dungeon/commander-resurrection-failed', {
+    const updated = this.append(run, outcome.success ? 'dungeon/commander-resurrection-completed' : 'dungeon/commander-resurrection-failed', {
       ticketId,
       completedAt: this.clock(),
     }, actor.sessionId)
-    return clone(run.commanderRescueTickets.find((item) => item.ticketId === ticketId)!)
+    return clone(updated.commanderRescueTickets.find((item) => item.ticketId === ticketId)!)
   }
 
   recoverRunAfterCommanderReturn(actor: Actor, runId: string): DungeonRun {
@@ -1144,19 +1160,19 @@ export class DungeonService {
     this.sweepExpiredState(runId)
     run = this.requireTank(actor, runId)
     const ticket = run.commanderRescueTickets.find((item) => item.status === 'issued' || item.status === 'consumed')
-    this.append(run, 'dungeon/commander-returned', {
+    const updated = this.append(run, 'dungeon/commander-returned', {
       resumedAt: this.clock(),
       ...(ticket ? { ticketId: ticket.ticketId, refundCharge: ticket.status === 'issued' } : {}),
     }, actor.sessionId)
-    return clone(run)
+    return clone(updated)
   }
 
   resumeDispatch(actor: Actor, runId: string): DungeonRun {
     const run = this.requireTank(actor, runId)
     assert(run.controlState === 'recovering' || run.controlState === 'throttled', 'DISPATCH_NOT_PAUSED', 'Dispatch is not ready to resume')
     assert(run.slots.tank.readiness === 'recovering' || run.commanderLoad !== 'unavailable', 'COMMANDER_NOT_RECOVERED', 'Commander is not recovered')
-    this.append(run, 'dungeon/dispatch-resumed', { resumedAt: this.clock() }, actor.sessionId)
-    return clone(run)
+    const updated = this.append(run, 'dungeon/dispatch-resumed', { resumedAt: this.clock() }, actor.sessionId)
+    return clone(updated)
   }
 
   observeAgentTurnEnd(
@@ -1207,9 +1223,9 @@ export class DungeonService {
       observedAt,
       version: priorVersion + 1,
     }
-    this.append(run, 'dungeon/member-health-signal-raised', { signal })
+    let updated = this.append(run, 'dungeon/member-health-signal-raised', { signal })
     const cutoff = Date.parse(observedAt) - this.config.readinessEvaluationWindowMs
-    const recent = run.healthSignals.filter(
+    const recent = updated.healthSignals.filter(
       (item) => item.slot === input.slot && Date.parse(item.observedAt) >= cutoff,
     )
     const criticalCount = recent.filter((item) => item.severity === 'critical').length
@@ -1220,8 +1236,8 @@ export class DungeonService {
         : warningCount >= this.config.readinessWarningSignalCount
           ? 'degraded'
           : undefined
-    if (nextReadiness && run.slots[input.slot].readiness !== nextReadiness) {
-      this.append(run, 'dungeon/member-readiness-changed', {
+    if (nextReadiness && updated.slots[input.slot].readiness !== nextReadiness) {
+      updated = this.append(updated, 'dungeon/member-readiness-changed', {
         slot: input.slot,
         readiness: nextReadiness,
         signalIds: recent.map((item) => item.id),
@@ -1267,11 +1283,11 @@ export class DungeonService {
     assert(run.slots.healer.currentSessionId === actor.sessionId, 'FORBIDDEN', 'Only the bound healer can complete maintenance')
     const instruction = run.recoveryInstructions.find((item) => item.instructionId === instructionId)
     assert(instruction?.status === 'issued', 'STALE_RECOVERY_INSTRUCTION', 'Recovery instruction is not active')
-    this.append(run, success ? 'dungeon/member-recovery-completed' : 'dungeon/member-recovery-failed', {
+    const updated = this.append(run, success ? 'dungeon/member-recovery-completed' : 'dungeon/member-recovery-failed', {
       instructionId,
       completedAt: this.clock(),
     }, actor.sessionId)
-    return clone(run.recoveryInstructions.find((item) => item.instructionId === instructionId)!)
+    return clone(updated.recoveryInstructions.find((item) => item.instructionId === instructionId)!)
   }
 
   registerTaskTurn(runId: string, taskId: string, turnId: string): TaskRecord {
@@ -1279,8 +1295,8 @@ export class DungeonService {
     const task = this.requireTask(run, taskId)
     assert(task.status === 'running' && task.activeLease, 'TASK_NOT_RUNNING', 'Only a running leased task can register a Turn')
     assert(typeof turnId === 'string' && turnId.trim(), 'TURN_ID_REQUIRED', 'Turn id is required')
-    this.append(run, 'dungeon/task-turn-registered', { taskId, turnId })
-    return clone(run.tasks[taskId]!)
+    const updated = this.append(run, 'dungeon/task-turn-registered', { taskId, turnId })
+    return clone(updated.tasks[taskId]!)
   }
 
   requestTaskInterrupt(actor: Actor, runId: string, taskId: string, turnId: string): TaskRecord {
@@ -1289,8 +1305,8 @@ export class DungeonService {
     assert(task.progressState === 'stalled', 'TASK_NOT_STALLED', 'Only a confirmed stalled task can be interrupted')
     assert(task.currentTurnId === turnId, 'TURN_ID_MISMATCH', 'Interrupt must reference the exact active Turn')
     assert(!task.interruptState, 'INTERRUPT_ALREADY_REQUESTED', 'Task interrupt already exists')
-    this.append(run, 'dungeon/task-interrupt-requested', { taskId, turnId }, actor.sessionId)
-    return clone(run.tasks[taskId]!)
+    const updated = this.append(run, 'dungeon/task-interrupt-requested', { taskId, turnId }, actor.sessionId)
+    return clone(updated.tasks[taskId]!)
   }
 
   completeTaskInterrupt(
@@ -1303,13 +1319,13 @@ export class DungeonService {
     const task = this.requireTask(run, taskId)
     assert(task.interruptState === 'requested', 'INTERRUPT_NOT_REQUESTED', 'Task interrupt was not requested')
     assert(task.currentTurnId === turnId, 'TURN_ID_MISMATCH', 'Interrupt result must reference the active Turn')
-    this.append(run, result.success ? 'dungeon/task-interrupt-completed' : 'dungeon/task-interrupt-failed', {
+    let current = this.append(run, result.success ? 'dungeon/task-interrupt-completed' : 'dungeon/task-interrupt-failed', {
       taskId,
       turnId,
       quarantinedFiles: clone(result.quarantinedFiles),
     })
     if (result.success && task.activeLease) {
-      this.append(run, 'dungeon/task-lease-revoked', {
+      current = this.append(current, 'dungeon/task-lease-revoked', {
         taskId,
         leaseId: task.activeLease.leaseId,
         leaseVersion: task.activeLease.version,
@@ -1317,21 +1333,21 @@ export class DungeonService {
       })
     }
     if (result.success && result.quarantinedFiles.length > 0) {
-      this.append(run, 'dungeon/workspace-changes-quarantined', {
+      current = this.append(current, 'dungeon/workspace-changes-quarantined', {
         taskId,
         files: clone(result.quarantinedFiles),
         turnId,
       })
     }
-    return clone(run.tasks[taskId]!)
+    return clone(current.tasks[taskId]!)
   }
 
   reviewQuarantinedChanges(actor: Actor, runId: string, taskId: string): TaskRecord {
     const run = this.requireTank(actor, runId)
     const task = this.requireTask(run, taskId)
     assert(task.quarantinedFiles?.length, 'NO_QUARANTINED_CHANGES', 'Task has no quarantined changes')
-    this.append(run, 'dungeon/workspace-quarantine-reviewed', { taskId }, actor.sessionId)
-    return clone(run.tasks[taskId]!)
+    const updated = this.append(run, 'dungeon/workspace-quarantine-reviewed', { taskId }, actor.sessionId)
+    return clone(updated.tasks[taskId]!)
   }
 
   reassignTask(actor: Actor, runId: string, taskId: string, ownerSlot: DpsSlot): TaskRecord {
@@ -1342,12 +1358,12 @@ export class DungeonService {
     assert(!task.quarantinedFiles?.length || task.quarantineReviewed, 'QUARANTINE_REVIEW_REQUIRED', 'Quarantined workspace changes require tank review')
     assert(run.slots[ownerSlot].currentSessionId, 'UNBOUND_SLOT', `Slot ${ownerSlot} is not bound`)
     assert(task.ownerSlot !== ownerSlot, 'OWNER_UNCHANGED', 'Choose a different DPS owner')
-    this.append(run, 'dungeon/task-owner-reassigned', {
+    const updated = this.append(run, 'dungeon/task-owner-reassigned', {
       taskId,
       previousOwnerSlot: task.ownerSlot,
       ownerSlot,
     }, actor.sessionId)
-    return clone(run.tasks[taskId]!)
+    return clone(updated.tasks[taskId]!)
   }
 
   evaluateTaskProgress(
@@ -1371,14 +1387,14 @@ export class DungeonService {
     const missedCheckpoints = (task.missedCheckpoints ?? 0) + 1
     const progressState: TaskProgressState =
       missedCheckpoints >= this.config.maxMissedCheckpoints ? 'stalled' : 'suspected-stalled'
-    this.append(run, progressState === 'stalled' ? 'dungeon/task-stall-confirmed' : 'dungeon/task-stall-suspected', {
+    const updated = this.append(run, progressState === 'stalled' ? 'dungeon/task-stall-confirmed' : 'dungeon/task-stall-suspected', {
       taskId,
       progressState,
       missedCheckpoints,
       nextCheckpointDueAt: new Date(now + this.config.progressCheckpointIntervalMs).toISOString(),
       evidence: ['checkpoint response window elapsed without registered activity or blocker'],
     })
-    return clone(run.tasks[taskId]!)
+    return clone(updated.tasks[taskId]!)
   }
 
   requestTaskCheckpoint(actor: Actor, runId: string, taskId: string): CheckpointRequest {
@@ -1434,12 +1450,12 @@ export class DungeonService {
       version: task.activeLease.version + 1,
       expiresAt: new Date(Date.parse(observedAt) + this.config.taskLeaseDurationMs).toISOString(),
     }
-    this.append(run, 'dungeon/checkpoint-submitted', {
+    const updated = this.append(run, 'dungeon/checkpoint-submitted', {
       checkpoint: { ...clone(checkpoint), observedAt },
       renewedLease,
       nextCheckpointDueAt: new Date(Date.parse(observedAt) + this.config.progressCheckpointIntervalMs).toISOString(),
     }, actor.sessionId)
-    return clone(run.tasks[checkpoint.taskId]!)
+    return clone(updated.tasks[checkpoint.taskId]!)
   }
 
   observeCommanderLoad(
@@ -1455,28 +1471,29 @@ export class DungeonService {
       : countExceeded || slaExceeded
         ? 'pressured'
         : 'normal'
+    let current = run
     if (run.commanderLoad !== commanderLoad) {
-      this.append(run, 'dungeon/commander-load-changed', { commanderLoad, ...clone(observation) })
+      current = this.append(current, 'dungeon/commander-load-changed', { commanderLoad, ...clone(observation) })
     }
     if (commanderLoad === 'overloaded' && run.controlState !== 'throttled') {
-      this.append(run, 'dungeon/dispatch-throttled', { reason: 'commander-overloaded' })
+      current = this.append(current, 'dungeon/dispatch-throttled', { reason: 'commander-overloaded' })
       const checkpoint: CommanderCheckpoint = {
         checkpointId: this.idGenerator(),
         runId,
-        phase: run.phase,
+        phase: current.phase,
         controlState: 'throttled',
-        taskSetVersion: run.taskSetVersion,
+        taskSetVersion: current.taskSetVersion,
         pendingDecisionIds: clone(observation.pendingDecisionIds),
-        activeLeaseIds: Object.values(run.tasks).flatMap((task) => task.activeLease ? [task.activeLease.leaseId] : []),
+        activeLeaseIds: Object.values(current.tasks).flatMap((task) => task.activeLease ? [task.activeLease.leaseId] : []),
         memberReadiness: Object.fromEntries(
-          slots.flatMap((slot) => run.slots[slot].readiness ? [[slot, run.slots[slot].readiness]] : []),
+          slots.flatMap((slot) => current.slots[slot].readiness ? [[slot, current.slots[slot].readiness]] : []),
         ),
-        workspaceFingerprint: run.workspaceFingerprint,
+        workspaceFingerprint: current.workspaceFingerprint,
         createdAt: this.clock(),
       }
-      this.append(run, 'dungeon/commander-checkpointed', { checkpoint })
+      current = this.append(current, 'dungeon/commander-checkpointed', { checkpoint })
     }
-    return clone(run)
+    return clone(current)
   }
 
   reopenTask(actor: Actor, runId: string, taskId: string, findingIds: string[]): TaskRecord {
@@ -1500,25 +1517,25 @@ export class DungeonService {
       }, actor.sessionId)
       throw new DungeonError('REPAIR_LIMIT_EXCEEDED', `Task ${taskId} exceeded the repair limit`)
     }
-    this.append(run, 'dungeon/task-reopened', {
+    const updated = this.append(run, 'dungeon/task-reopened', {
       taskId,
       findingIds: clone(findingIds),
       taskVersion: task.workOrder.version + 1,
       taskSetVersion: run.taskSetVersion + 1,
       repairRound: task.repairRound + 1,
     }, actor.sessionId)
-    return clone(run.tasks[taskId]!)
+    return clone(updated.tasks[taskId]!)
   }
 
   observeWorkspaceFingerprint(runId: string, workspaceFingerprint: string): DungeonRun {
     const run = this.requireRun(runId)
     this.assertMutable(run)
     if (run.workspaceFingerprint === workspaceFingerprint) return clone(run)
-    this.append(run, 'dungeon/workspace-fingerprint-observed', {
+    const updated = this.append(run, 'dungeon/workspace-fingerprint-observed', {
       previousFingerprint: run.workspaceFingerprint,
       workspaceFingerprint,
     })
-    return clone(run)
+    return clone(updated)
   }
 
   createValidationManifest(actor: Actor, runId: string, workspaceFingerprint: string): ValidationManifest {
@@ -1663,13 +1680,13 @@ export class DungeonService {
       'VALIDATION_REQUIRED',
       'Blocking findings remain',
     )
-    this.append(run, 'dungeon/run-completion-prepared', {
+    const updated = this.append(run, 'dungeon/run-completion-prepared', {
       taskSetVersion: run.taskSetVersion,
       manifestVersion: manifest.manifestVersion,
       workspaceFingerprint,
     }, actor.sessionId)
-    this.append(run, 'dungeon/run-completed', { resultSummary }, actor.sessionId)
-    return clone(run)
+    const completed = this.append(updated, 'dungeon/run-completed', { resultSummary }, actor.sessionId)
+    return clone(completed)
   }
 
   async waitForChange(
@@ -1752,6 +1769,11 @@ export class DungeonService {
     return clone(this.config.fingerprintIgnoreScopes)
   }
 
+  /** Enumerate in-memory run ids for watchdog sweeps and diagnostics. */
+  listRunIds(): string[] {
+    return [...this.runs.keys()]
+  }
+
   getRun(runId: string): DungeonRun {
     return clone(this.requireRun(runId))
   }
@@ -1762,11 +1784,12 @@ export class DungeonService {
     return clone(run)
   }
 
-  private append(run: DungeonRun, type: string, payload: unknown, actorSessionId?: string): void {
+  private append(run: DungeonRun, type: string, payload: unknown, actorSessionId?: string): DungeonRun {
+    const nextSequence = (this.sequenceCounters.get(run.id) ?? 1)
     const event: DungeonEvent = {
       eventId: this.idGenerator(),
       runId: run.id,
-      sequence: this.eventStore.load(run.id).length + 1,
+      sequence: nextSequence,
       schemaVersion: 1,
       type,
       occurredAt: this.clock(),
@@ -1777,9 +1800,10 @@ export class DungeonService {
     this.eventStore.append(canonicalEvent)
     const updated = this.reduce(this.runs.get(run.id), canonicalEvent)
     this.runs.set(run.id, updated)
-    Object.assign(run, updated)
+    this.sequenceCounters.set(run.id, nextSequence + 1)
     this.eventStore.publishProjection?.(clone(updated))
     for (const notify of [...(this.waiters.get(run.id) ?? [])]) notify()
+    return updated
   }
 
   private reduce(current: DungeonRun | undefined, event: DungeonEvent): DungeonRun {
@@ -1955,6 +1979,8 @@ export class DungeonService {
         const task = run.tasks[report.taskId]!
         task.executionReports.push(report)
         task.status = report.status
+        task.progressState = 'on-track'
+        task.missedCheckpoints = 0
         const checkpointRequest = run.checkpointRequests.find((request) =>
           request.taskId === report.taskId &&
           request.leaseId === report.leaseId &&
@@ -1988,6 +2014,11 @@ export class DungeonService {
         const task = run.tasks[payload.taskId]!
         delete task.activeLease
         task.status = 'ready'
+        // Lease expiry returns the task to the schedulable pool so any free
+        // DPS may claim it. Other revocation reasons (member-down,
+        // turn-interrupted) keep the owner so battle resurrection and
+        // reassignment keep their target.
+        if (payload.reason === 'lease-expired') delete task.ownerSlot
         break
       }
       case 'dungeon/workspace-changes-quarantined': {

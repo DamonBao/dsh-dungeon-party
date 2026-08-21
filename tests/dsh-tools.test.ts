@@ -250,4 +250,75 @@ describe('DSH dungeon tools', () => {
       ),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' })
   })
+
+  it('derives checkpoint lease identity so the DPS only supplies semantics', async () => {
+    const { service, definitions } = setup()
+    const checkpointTool = definitions.find((definition) => definition.name === 'member_checkpoint')!
+    const tank = { sessionId: 'tank' }
+    service.startRun({ runId: 'run', objective: 'o', workspaceRoot: '/workspace', workspaceFingerprint: 'v1', tankSessionId: 'tank' })
+    service.bindMember(tank, 'run', 'healer', 'session-healer')
+    service.bindMember(tank, 'run', 'dps-1', 'session-dps')
+    service.changePhase(tank, 'run', 'PLANNING')
+    service.createTask(tank, 'run', {
+      id: 'task', runId: 'run', title: 'T', objective: 'T', inputs: [], constraints: [],
+      acceptanceCriteria: [{ id: 'task:done', description: 'Done', required: true }],
+      readScopes: ['src/**'], writeScopes: ['src/**'], blockedBy: [], expectedArtifacts: [],
+      priority: 'normal', required: true, version: 1,
+    })
+    service.changePhase(tank, 'run', 'EXECUTING')
+    service.assignTask(tank, 'run', 'task', 'dps-1')
+    const lease = service.claimTask({ sessionId: 'session-dps' }, 'run', 'task')
+
+    const submitted = await checkpointTool.execute(
+      { runId: 'run', taskId: 'task', completed: ['step'], evidenceDelta: ['evidence'] },
+      execution('session-dps'),
+    ) as unknown as { activeLease?: { version: number }, lastCheckpoint?: { evidenceDelta: string[] } }
+
+    expect(submitted.activeLease?.version).toBe(2)
+    expect(submitted.lastCheckpoint?.evidenceDelta).toEqual(['evidence'])
+    expect(service.getRun('run').tasks.task!.activeLease?.leaseId).toBe(lease.leaseId)
+  })
+
+  it('derives manifest identity so the healer only supplies semantics', async () => {
+    const { service, definitions } = setup()
+    const submitTool = definitions.find((definition) => definition.name === 'validation_submit')!
+    const tank = { sessionId: 'tank' }
+    service.startRun({ runId: 'run', objective: 'o', workspaceRoot: process.cwd(), workspaceFingerprint: 'v1', tankSessionId: 'tank' })
+    service.bindMember(tank, 'run', 'healer', 'session-healer')
+    service.bindMember(tank, 'run', 'dps-1', 'session-dps')
+    service.changePhase(tank, 'run', 'PLANNING')
+    service.createTask(tank, 'run', {
+      id: 'task', runId: 'run', title: 'T', objective: 'T', inputs: [], constraints: [],
+      acceptanceCriteria: [{ id: 'task:done', description: 'Done', required: true }],
+      readScopes: ['tests/**'], writeScopes: ['tests/**'], blockedBy: [], expectedArtifacts: [],
+      priority: 'normal', required: true, version: 1,
+    })
+    service.changePhase(tank, 'run', 'EXECUTING')
+    service.assignTask(tank, 'run', 'task', 'dps-1')
+    const lease = service.claimTask({ sessionId: 'session-dps' }, 'run', 'task')
+    service.submitExecution({ sessionId: 'session-dps' }, 'run', {
+      taskId: 'task', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
+      slot: 'dps-1', generation: 1, status: 'completed', summary: 'done',
+      changedFiles: ['tests/dsh-tools.test.ts'], evidence: ['green'], commandsRun: [], risks: [], remainingWork: [],
+    })
+    service.changePhase(tank, 'run', 'VALIDATING')
+    const manifest = service.createValidationManifest(tank, 'run', 'v1')
+
+    const report = await submitTool.execute(
+      {
+        runId: 'run', verdict: 'fail', summary: 'artifact missing',
+        checks: [{ criterionId: 'task:done', status: 'fail', evidence: ['file absent'] }],
+        findings: [{
+          id: 'F-1', severity: 'major', ownerTaskId: 'task',
+          title: 'missing artifact', evidence: 'not on disk', remediation: 'redeliver',
+        }],
+      },
+      execution('session-healer'),
+    ) as unknown as { verdict: string, manifestVersion: number, workspaceFingerprint: string }
+
+    expect(report.verdict).toBe('fail')
+    expect(report.manifestVersion).toBe(manifest.manifestVersion)
+    expect(report.workspaceFingerprint).toBe(manifest.workspaceFingerprint)
+    expect(service.getRun('run').validationReports).toHaveLength(1)
+  })
 })

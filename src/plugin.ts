@@ -20,6 +20,13 @@ registerDungeonSessionEventTypes()
 export interface DungeonPartyPluginConfig {
   dungeon?: Partial<DungeonConfig>
   eventStore?: DungeonEventStore
+  /**
+   * Explicit provider/model route for party child agents. The live model
+   * selection of the commander session is context-scoped and not exposed on
+   * the rc8 Agent API, so `{...tankAgent.options}` cannot capture a UI-side
+   * model switch; configure childRoute to pin the whole party to one route.
+   */
+  childRoute?: { provider?: string; model?: string }
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -44,6 +51,10 @@ export const inject = ['tools', 'sessions', 'agents', 'agentPresets']
 
 const positiveInteger = () => z.number().step(1).min(1)
 export const Config = z.object({
+  childRoute: z.object({
+    provider: z.string(),
+    model: z.string(),
+  }),
   dungeon: z.object({
     scopeEnforcementMode: z.union(['auto', 'telemetry', 'aggregate', 'serial']),
     strictPerAgentWriteScopes: z.boolean(),
@@ -65,7 +76,9 @@ export const Config = z.object({
     readinessCriticalSignalCount: positiveInteger(),
     commanderMaxPendingDecisions: positiveInteger(),
     commanderDecisionSlaMs: positiveInteger(),
-    fingerprintIgnoreScopes: z.array(z.string()),
+    fingerprintIgnoreScopes: z.array(z.string()).default([
+      '.git/**', 'node_modules/**', 'lib/**', 'dist/**', 'coverage/**', '.dsh/dungeon-party/tmp/**',
+    ]),
     validationRequired: z.boolean(),
   }),
 })
@@ -94,7 +107,7 @@ export class DungeonPartyService extends Service {
       eventStore: config.eventStore ?? new SessionDungeonEventStore(ctx.sessions),
       ...(config.dungeon ? { config: config.dungeon } : {}),
     })
-    this.agentManager = new PartyAgentManager(this.core, ctx.agents, ctx.agentPresets)
+    this.agentManager = new PartyAgentManager(this.core, ctx.agents, ctx.agentPresets, config.childRoute)
     const core = this.core
     const manager = this.agentManager
     const dispatchCommanderTickets = (runIds: string[]) => {
@@ -108,7 +121,15 @@ export class DungeonPartyService extends Service {
       const reason = event.data.reason
       const signals = core.observeAgentTurnEnd(String(session.id), reason.kind, [JSON.stringify(reason)])
       dispatchCommanderTickets(signals.map((signal) => signal.runId))
+      manager.nudgeAfterTurnEnd(String(session.id))
     })
+    // Periodic watchdog: expires stale leases, escalates stalled tasks, and
+    // keeps dispatch moving even when no tool call kicks the scheduler.
+    const watchdogTimer = setInterval(() => {
+      void manager.runWatchdog().catch(() => undefined)
+    }, 30_000)
+    watchdogTimer.unref?.()
+    ctx.effect(() => () => clearInterval(watchdogTimer), 'dungeon-party watchdog')
     ctx.on('agent/disposed', ({ agent }) => {
       manager.forgetDisposedAgent(String(agent.id))
       const runs = core.observeAgentDisposed(String(agent.id), 'runtime Agent disposed')

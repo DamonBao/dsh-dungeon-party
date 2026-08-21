@@ -337,6 +337,7 @@ export declare class DungeonService {
     private readonly clock;
     private readonly config;
     private readonly waiters;
+    private readonly sequenceCounters;
     constructor(options: DungeonServiceOptions);
     startRun(input: StartRunInput): DungeonRun;
     recoverRun(runId: string): DungeonRun;
@@ -398,6 +399,8 @@ export declare class DungeonService {
     waitForChange(actor: Actor, runId: string, afterSequence: number, timeoutMs?: number, signal?: AbortSignal): Promise<DungeonWaitResult>;
     sendPartyMessage(actor: Actor, runId: string, toSlot: PartySlot, input: PartyMessageInput): PartyMessage;
     getFingerprintIgnoreScopes(): string[];
+    /** Enumerate in-memory run ids for watchdog sweeps and diagnostics. */
+    listRunIds(): string[];
     getRun(runId: string): DungeonRun;
     getRunForActor(actor: Actor, runId: string): DungeonRun;
     private append;

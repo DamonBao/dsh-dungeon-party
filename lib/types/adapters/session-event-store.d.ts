@@ -9,6 +9,12 @@ declare module '@deepseek-ai/dsh-session/types' {
 export declare class SessionDungeonEventStore implements DungeonEventStore {
     private readonly sessions;
     private readonly runSessions;
+    /** Per-run event index so load() stops rescanning/cloning the whole log. */
+    private readonly eventCache;
+    private readonly cacheSessions;
+    private projectionCounter;
+    private readonly lastProjectedPhase;
+    private static readonly PROJECTION_INTERVAL;
     constructor(sessions: SessionStore);
     append(event: DungeonEvent): void;
     publishProjection(run: DungeonRun): void;

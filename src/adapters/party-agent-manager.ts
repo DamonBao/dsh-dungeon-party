@@ -9,6 +9,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import {
   DungeonError,
   type Actor,
+  type DungeonRun,
   type DungeonService,
   type ExecutionReport,
   type PartyMessageInput,
@@ -43,12 +44,30 @@ export class PartyAgentManager {
   private readonly dispatchedRecoveryIds = new Set<string>()
   private readonly leaseAudits = new Map<string, { leaseId: string; snapshot: WorkspaceSnapshot }>()
   private readonly pending = new Map<string, Promise<string>>()
+  /** Serializes dispatch per run so concurrent kicks cannot double-assign. */
+  private readonly dispatchLocks = new Map<string, Promise<unknown>>()
+  /** Rate-limits dangling-lease turn-end nudges per session. */
+  private readonly turnEndNudges = new Map<string, number>()
+  /** Agent contexts that already carry the execution guard. */
+  private readonly guardedContexts = new WeakSet<Context>()
+  /** Unexpected scheduler errors, kept for diagnostics instead of failing post-commit flows. */
+  readonly schedulerErrors: unknown[] = []
 
   constructor(
     private readonly service: DungeonService,
     private readonly agents: AgentRegistry,
     private readonly presets: AgentPresets,
+    private readonly childRoute: { provider?: string; model?: string } = {},
   ) {}
+
+  /**
+   * Child agent model route: explicit childRoute config wins over the tank's
+   * creation-time options (the tank's live UI-side model selection is not
+   * exposed on the rc8 Agent API and cannot be inherited automatically).
+   */
+  private childAgentOptions(tankAgent: Agent): { provider?: string; model?: string; maxTokens?: number } {
+    return { ...tankAgent.options, ...this.childRoute }
+  }
 
   async restoreBoundParty(actor: Actor, runId: string): Promise<void> {
     const run = this.service.getRunForActor(actor, runId)
@@ -81,14 +100,132 @@ export class PartyAgentManager {
     if (!tankSessionId) return []
     try {
       return await this.dispatchAvailableTasks({ sessionId: tankSessionId }, runId)
-    } catch {
-      // Scheduling is best-effort after a committed state transition. A later
-      // status/phase/task event can safely kick it again without duplicating work.
+    } catch (error) {
+      // Scheduling is best-effort after a committed state transition; expected
+      // domain refusals are safe to swallow. Unexpected failures are recorded
+      // so they surface in diagnostics instead of vanishing.
+      if (!(error instanceof DungeonError)) this.schedulerErrors.push(error)
       return []
     }
   }
 
   async dispatchAvailableTasks(actor: Actor, runId: string): Promise<string[]> {
+    return this.withDispatchLock(runId, () => this.dispatchAvailableTasksUnlocked(actor, runId))
+  }
+
+  /**
+   * Periodic watchdog: revokes expired leases (notifying the owner and
+   * redispatching the task), and escalates stalled progress from a checkpoint
+   * nudge to a tank alert using the service's own clock.
+   */
+  async runWatchdog(): Promise<void> {
+    for (const runId of this.service.listRunIds()) {
+      let run: DungeonRun
+      try {
+        run = this.service.getRun(runId)
+      } catch {
+        continue
+      }
+      if (run.phase !== 'EXECUTING' && run.phase !== 'REPAIR') continue
+      const tankSessionId = run.slots.tank.currentSessionId
+      if (!tankSessionId) continue
+      const tankActor: Actor = { sessionId: tankSessionId }
+
+      const heldLeases = Object.values(run.tasks)
+        .filter((task) => task.activeLease && task.ownerSlot)
+        .map((task) => ({ taskId: task.workOrder.id, slot: task.ownerSlot!, leaseId: task.activeLease!.leaseId }))
+      this.service.sweepExpiredState(runId)
+      const swept = this.service.getRun(runId)
+      const revoked = heldLeases.filter(({ taskId, leaseId }) => {
+        const task = swept.tasks[taskId]
+        return !task?.activeLease || task.activeLease.leaseId !== leaseId
+      })
+      for (const { taskId, slot, leaseId } of revoked) {
+        this.handles.get(keyFor(runId, slot))?.agent.send(createUserMessage({
+          content: [{
+            type: 'text',
+            text: `Your lease ${leaseId} for task ${taskId} expired and was revoked; the task returned to the schedulable pool and will be redispatched. Do not continue edits on it.`,
+          }],
+          source: { kind: 'plugin', plugin: 'dsh-dungeon-party', form: 'relay' },
+        }), 'next-step', true)
+      }
+      if (revoked.length > 0) {
+        await this.dispatchAvailableTasks(tankActor, runId).catch(() => undefined)
+        continue
+      }
+
+      for (const task of Object.values(swept.tasks)) {
+        if (task.status !== 'running' || !task.activeLease || !task.ownerSlot) continue
+        const before = task.progressState
+        this.service.evaluateTaskProgress(runId, task.workOrder.id, {})
+        const after = this.service.getRun(runId).tasks[task.workOrder.id]
+        if (!after || after.progressState === before) continue
+        if (after.progressState === 'suspected-stalled') {
+          try {
+            this.requestCheckpoint(tankActor, runId, task.workOrder.id)
+          } catch {
+            // The DPS agent may not be live; the next watchdog pass retries.
+          }
+        } else if (after.progressState === 'stalled') {
+          this.agents.get(tankSessionId as SessionId)?.send(createUserMessage({
+            content: [{
+              type: 'text',
+              text: `Task stall confirmed for ${task.workOrder.id} on ${task.ownerSlot}: ${after.missedCheckpoints ?? 0} missed checkpoints. Use party_request_checkpoint for evidence, or party_interrupt once the task is confirmed stalled.`,
+            }],
+            source: { kind: 'plugin', plugin: 'dsh-dungeon-party', form: 'relay' },
+          }), 'next-step', true)
+        }
+      }
+    }
+  }
+
+  /**
+   * Nudge a DPS whose turn ended while it still holds an active lease,
+   * rate-limited to one nudge per session per minute.
+   */
+  nudgeAfterTurnEnd(sessionId: string): void {
+    const now = Date.now()
+    const last = this.turnEndNudges.get(sessionId)
+    if (last !== undefined && now - last < 60_000) return
+    for (const runId of this.service.listRunIds()) {
+      let run: DungeonRun
+      try {
+        run = this.service.getRun(runId)
+      } catch {
+        continue
+      }
+      const slot = run.phase === 'EXECUTING' || run.phase === 'REPAIR'
+        ? (['dps-1', 'dps-2', 'dps-3'] as const).find((candidate) => run.slots[candidate].currentSessionId === sessionId)
+        : undefined
+      if (!slot) continue
+      const task = Object.values(run.tasks).find((candidate) =>
+        candidate.ownerSlot === slot && candidate.status === 'running' && candidate.activeLease,
+      )
+      if (!task) continue
+      this.turnEndNudges.set(sessionId, now)
+      this.handles.get(keyFor(runId, slot))?.agent.send(createUserMessage({
+        content: [{
+          type: 'text',
+          text: `Your turn ended while task ${task.workOrder.id} still holds an active lease. Call member_checkpoint with progress evidence, or work_submit when finished, before starting unrelated work.`,
+        }],
+        source: { kind: 'plugin', plugin: 'dsh-dungeon-party', form: 'relay' },
+      }), 'next-step', true)
+      return
+    }
+  }
+
+  private async withDispatchLock<T>(runId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.dispatchLocks.get(runId) ?? Promise.resolve()
+    const chained = previous.catch(() => undefined).then(operation)
+    this.dispatchLocks.set(runId, chained)
+    try {
+      return await chained
+    } finally {
+      if (this.dispatchLocks.get(runId) === chained) this.dispatchLocks.delete(runId)
+    }
+  }
+
+  private async dispatchAvailableTasksUnlocked(actor: Actor, runId: string): Promise<string[]> {
     const assigned: string[] = []
     const run = this.service.getRunForActor(actor, runId)
     if (run.phase !== 'EXECUTING' && run.phase !== 'REPAIR') return assigned
@@ -275,14 +412,14 @@ export class PartyAgentManager {
           if (!tankAgent) throw new DungeonError('TANK_AGENT_UNAVAILABLE', 'The bound tank Agent is not live')
           handle = await tankAgent.ctx.agents.resume({
             resumeSessionId: request.targetSessionId as SessionId,
-            agentOptions: { ...tankAgent.options },
+            agentOptions: this.childAgentOptions(tankAgent),
             setup: async (agentCtx: Context) => {
               this.presets.composeFrom(agentCtx, tankAgent.ctx)
               agentCtx.tools.restrict({ allow: roleTools[request.targetSlot] })
               agentCtx.systemPrompt.section({
                 name: 'deployment:persona', order: 0, text: rolePersonas[request.targetSlot],
               })
-              this.installExecutionGuard(agentCtx, runId, request.targetSlot)
+              this.ensureGuardInstalled(agentCtx, runId, request.targetSlot)
             },
           })
           restored = true
@@ -329,7 +466,7 @@ export class PartyAgentManager {
     const sessionId = `${runId}-${request.targetSlot}-g${generation}`
     const handle = await tankAgent.ctx.agents.create({
       sessionId: sessionId as SessionId,
-      agentOptions: { ...tankAgent.options },
+      agentOptions: this.childAgentOptions(tankAgent),
       meta: {
         cwd: run.workspaceRoot,
         parentSession: tankSessionId as SessionId,
@@ -345,7 +482,7 @@ export class PartyAgentManager {
           order: 0,
           text: rolePersonas[request.targetSlot],
         })
-        this.installExecutionGuard(agentCtx, runId, request.targetSlot)
+        this.ensureGuardInstalled(agentCtx, runId, request.targetSlot)
       },
     })
     this.ensureSubagentDescriptor(handle.agent, runId, request.targetSlot)
@@ -418,6 +555,20 @@ export class PartyAgentManager {
 
   completeLeaseAudit(runId: string, taskId: string): void {
     this.leaseAudits.delete(`${runId}:${taskId}`)
+  }
+
+  /**
+   * Re-baseline the workspace audit for an active lease. Called when a
+   * checkpoint renews the lease so pre-existing external noise no longer
+   * blocks the eventual work_submit.
+   */
+  refreshLeaseAudit(runId: string, taskId: string): void {
+    const audit = this.leaseAudits.get(`${runId}:${taskId}`)
+    if (!audit) return
+    const run = this.service.getRun(runId)
+    const task = run.tasks[taskId]
+    if (!task?.activeLease || task.activeLease.leaseId !== audit.leaseId) return
+    audit.snapshot = createWorkspaceSnapshot(run.workspaceRoot, this.service.getFingerprintIgnoreScopes())
   }
 
   async interruptTask(actor: Actor, runId: string, taskId: string, turnId: string): Promise<void> {
@@ -535,15 +686,27 @@ export class PartyAgentManager {
     await Promise.all(handles.map((handle) => handle.dispose()))
   }
 
-  private installExecutionGuard(agentCtx: Context, runId: string, slot: ChildSlot): void {
+  /** Installs the execution guard at most once per agent context. */
+  private ensureGuardInstalled(agentCtx: Context, runId: string, slot: ChildSlot): void {
     if (slot === 'healer') return
+    if (this.guardedContexts.has(agentCtx)) return
+    this.guardedContexts.add(agentCtx)
+    this.installExecutionGuard(agentCtx, runId, slot)
+  }
+
+  private installExecutionGuard(agentCtx: Context, runId: string, slot: ChildSlot): void {
     agentCtx.on('tools/pre-execute', async (exec, next) => {
       if (exec.name !== 'write' && exec.name !== 'edit' && exec.name !== 'bash') return next()
       const run = this.service.getRun(runId)
       const task = Object.values(run.tasks).find((candidate) =>
         candidate.ownerSlot === slot && candidate.status === 'running' && candidate.activeLease,
       )
-      if (!task) return { kind: 'deny', reason: 'DPS write/command tools require an active dungeon task lease.' }
+      if (!task) {
+        return {
+          kind: 'deny',
+          reason: 'No active dungeon task lease. Call work_claim for your assigned task before write/edit/bash.',
+        }
+      }
       const args = exec.arguments as Record<string, unknown>
       if (exec.name === 'write' || exec.name === 'edit') {
         const suppliedPath = args.file_path ?? args.path
@@ -556,6 +719,17 @@ export class PartyAgentManager {
         if (!allowed) return { kind: 'deny', reason: `Path ${suppliedPath} is outside the active task writeScopes.` }
       } else {
         const command = typeof args.command === 'string' ? args.command.trim().replace(/\s+/g, ' ') : ''
+        // Preventive interception for git commands that rewrite workspace
+        // content: the snapshot audit only catches them after the damage.
+        // Non-destructive git (status/log/diff/add/commit/…) stays available.
+        const destructiveGit = (/^git\s+reset\b/.test(command) && /(^|\s)--hard\b/.test(command)) ||
+          /^git\s+(?:clean|checkout|switch|restore|stash)\b/.test(command)
+        if (destructiveGit) {
+          return {
+            kind: 'deny',
+            reason: `Destructive git command denied: ${command}. It rewrites workspace content that the scope audit can only detect after the fact. Use non-destructive git (status/log/diff/add/commit) instead.`,
+          }
+        }
         const isGlobal = /^(?:npm|pnpm|yarn|bun)\s+(?:install|add|remove|uninstall|update|upgrade)\b/i.test(command) ||
           /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:format|fmt|codegen|generate|migrate)\b/i.test(command) ||
           /\b(?:prisma|drizzle|typeorm)\s+(?:generate|migrate)\b/i.test(command)
@@ -598,6 +772,10 @@ export class PartyAgentManager {
     const live = this.agents.get(sessionId as SessionId)
     if (live) {
       this.ensureSubagentDescriptor(live, runId, slot)
+      // An agent created outside the dungeon flow never ran our setup; make
+      // sure its context still carries the execution guard.
+      const liveCtx = (live as { ctx?: Context }).ctx
+      if (liveCtx) this.ensureGuardInstalled(liveCtx, runId, slot)
       this.handles.set(key, { agent: live, dispose: async () => undefined } as AgentHandle)
       return sessionId
     }
@@ -605,7 +783,7 @@ export class PartyAgentManager {
     if (!tankAgent) throw new DungeonError('TANK_AGENT_UNAVAILABLE', 'The bound tank Agent is not live')
     const handle = await tankAgent.ctx.agents.resume({
       resumeSessionId: sessionId as SessionId,
-      agentOptions: { ...tankAgent.options },
+      agentOptions: this.childAgentOptions(tankAgent),
       setup: async (agentCtx: Context) => {
         this.presets.composeFrom(agentCtx, tankAgent.ctx)
         agentCtx.tools.restrict({ allow: roleTools[slot] })
@@ -614,7 +792,7 @@ export class PartyAgentManager {
           order: 0,
           text: rolePersonas[slot],
         })
-        this.installExecutionGuard(agentCtx, runId, slot)
+        this.ensureGuardInstalled(agentCtx, runId, slot)
       },
     })
     this.ensureSubagentDescriptor(handle.agent, runId, slot)
@@ -630,7 +808,7 @@ export class PartyAgentManager {
     const sessionId = `${runId}-${slot}-g${generation}`
     const handle = await tankAgent.ctx.agents.create({
       sessionId: sessionId as SessionId,
-      agentOptions: { ...tankAgent.options },
+      agentOptions: this.childAgentOptions(tankAgent),
       meta: {
         cwd: run.workspaceRoot,
         parentSession: actor.sessionId as SessionId,
@@ -646,7 +824,7 @@ export class PartyAgentManager {
           order: 0,
           text: rolePersonas[slot],
         })
-        this.installExecutionGuard(agentCtx, runId, slot)
+        this.ensureGuardInstalled(agentCtx, runId, slot)
       },
     })
     this.ensureSubagentDescriptor(handle.agent, runId, slot)

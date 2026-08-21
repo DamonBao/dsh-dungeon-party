@@ -64,6 +64,15 @@ function setup(workspaceRoot = '/workspace') {
 }
 
 describe('PartyAgentManager', () => {
+  it('pins child agents to the configured model route over inherited options', async () => {
+    const { service, agents, presets, create } = setup()
+    const manager = new PartyAgentManager(service, agents as never, presets as never, { provider: 'glm', model: 'glm-5.3-zp' })
+    await manager.ensureMember({ sessionId: 'tank' }, 'run', 'dps-1')
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      agentOptions: expect.objectContaining({ provider: 'glm', model: 'glm-5.3-zp' }),
+    }))
+  })
+
   it('creates and binds the healer before execution using inherited preset composition', async () => {
     const { service, manager, create, composeFrom, restrictions, sections } = setup()
 
@@ -342,6 +351,92 @@ describe('PartyAgentManager', () => {
     )).resolves.toMatchObject({ kind: 'deny' })
   })
 
+  it('allows safe git but denies destructive git under an active lease', async () => {
+    const { service, manager, on } = setup()
+    const tank = { sessionId: 'tank' }
+    await manager.ensureMember(tank, 'run', 'healer')
+    await manager.ensureMember(tank, 'run', 'dps-1')
+    service.changePhase(tank, 'run', 'PLANNING')
+    service.createTask(tank, 'run', {
+      id: 'task', runId: 'run', title: 'Task', objective: 'Edit src', inputs: [], constraints: [],
+      acceptanceCriteria: [{ id: 'done', description: 'Done', required: true }],
+      readScopes: ['src/**'], writeScopes: ['src/**'], blockedBy: [], expectedArtifacts: [],
+      priority: 'normal', required: true, version: 1,
+    })
+    service.changePhase(tank, 'run', 'EXECUTING')
+    service.assignTask(tank, 'run', 'task', 'dps-1')
+    service.claimTask({ sessionId: 'run-dps-1-g1' }, 'run', 'task')
+    const guard = on.mock.calls.find(([event]) => event === 'tools/pre-execute')?.[1]
+    const next = vi.fn(async () => ({ kind: 'allow' }))
+
+    // Safe git passes through to execution.
+    await expect(guard({ name: 'bash', arguments: { command: 'git status --short' } }, next))
+      .resolves.toMatchObject({ kind: 'allow' })
+    await expect(guard({ name: 'bash', arguments: { command: 'git add src/index.ts' } }, next))
+      .resolves.toMatchObject({ kind: 'allow' })
+    await expect(guard({ name: 'bash', arguments: { command: 'git commit -m "work"' } }, next))
+      .resolves.toMatchObject({ kind: 'allow' })
+    await expect(guard({ name: 'bash', arguments: { command: 'git reset --soft HEAD~1' } }, next))
+      .resolves.toMatchObject({ kind: 'allow' })
+
+    // Content-rewriting git is intercepted before execution.
+    for (const command of [
+      'git reset --hard HEAD',
+      'git clean -fd',
+      'git checkout -- src/other.ts',
+      'git restore src/other.ts',
+      'git stash push',
+      'git switch main',
+    ]) {
+      await expect(guard({ name: 'bash', arguments: { command } }, next))
+        .resolves.toMatchObject({ kind: 'deny', reason: expect.stringContaining('Destructive git command denied') })
+    }
+  })
+
+  it('installs the execution guard on a live agent restored in place', async () => {
+    const { service, manager, agents, presets, on } = setup()
+    const tank = { sessionId: 'tank' }
+    await manager.ensureMember(tank, 'run', 'healer')
+    await manager.ensureMember(tank, 'run', 'dps-1')
+    service.changePhase(tank, 'run', 'PLANNING')
+    service.createTask(tank, 'run', {
+      id: 'task', runId: 'run', title: 'Task', objective: 'Edit src', inputs: [], constraints: [],
+      acceptanceCriteria: [{ id: 'done', description: 'Done', required: true }],
+      readScopes: ['src/**'], writeScopes: ['src/**'], blockedBy: [], expectedArtifacts: [],
+      priority: 'normal', required: true, version: 1,
+    })
+    service.changePhase(tank, 'run', 'EXECUTING')
+    service.assignTask(tank, 'run', 'task', 'dps-1')
+    service.claimTask({ sessionId: 'run-dps-1-g1' }, 'run', 'task')
+
+    // Simulate a host restart: the agent is live in the registry with a fresh
+    // context that never ran dungeon setup, while our handle map is cold.
+    const on2 = vi.fn()
+    const liveChild = {
+      id: 'run-dps-1-g1',
+      options: { provider: 'deepseek', model: 'deepseek-chat' },
+      send: vi.fn(),
+      cancel: vi.fn(),
+      whenIdle: vi.fn(async () => undefined),
+      session: { events: [] as Array<{ type: string }>, append: vi.fn() },
+      ctx: { on: on2 },
+    }
+    const originalGet = agents.get.bind(agents)
+    agents.get = ((id: string) => id === 'run-dps-1-g1' ? liveChild : originalGet(id)) as typeof agents.get
+
+    const restarted = new PartyAgentManager(service, agents as never, presets as never)
+    await restarted.restoreBoundParty(tank, 'run')
+
+    const guard = on2.mock.calls.find(([event]) => event === 'tools/pre-execute')?.[1]
+    expect(guard).toBeTypeOf('function')
+    await expect(guard(
+      { name: 'write', arguments: { file_path: 'README.md' } },
+      vi.fn(async () => ({ kind: 'allow' })),
+    )).resolves.toMatchObject({ kind: 'deny' })
+    // The original creation-time guard is untouched (no duplicate install).
+    expect(on.mock.calls.filter(([event]) => event === 'tools/pre-execute')).toHaveLength(1)
+  })
+
   it('rejects host-observed workspace writes outside all active scopes', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dungeon-audit-'))
     mkdirSync(join(root, 'src'))
@@ -370,6 +465,53 @@ describe('PartyAgentManager', () => {
         slot: 'dps-1', generation: 1, status: 'completed', summary: 'done', changedFiles: [],
         evidence: ['done'], commandsRun: [], risks: [], remainingWork: [],
       })).toThrowError(expect.objectContaining({ code: 'ACTUAL_WRITE_SCOPE_VIOLATION' }))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('re-baselines the lease audit when a checkpoint renews the lease', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dungeon-audit-'))
+    mkdirSync(join(root, 'src'))
+    writeFileSync(join(root, 'src', 'index.ts'), 'export {}\n')
+    try {
+      const { service, manager } = setup(root)
+      const tank = { sessionId: 'tank' }
+      await manager.ensureMember(tank, 'run', 'healer')
+      await manager.ensureMember(tank, 'run', 'dps-1')
+      service.changePhase(tank, 'run', 'PLANNING')
+      service.createTask(tank, 'run', {
+        id: 'task', runId: 'run', title: 'Task', objective: 'Edit src', inputs: [], constraints: [],
+        acceptanceCriteria: [{ id: 'done', description: 'Done', required: true }],
+        readScopes: ['src/**'], writeScopes: ['src/**'], blockedBy: [], expectedArtifacts: [],
+        priority: 'normal', required: true, version: 1,
+      })
+      service.changePhase(tank, 'run', 'EXECUTING')
+      service.assignTask(tank, 'run', 'task', 'dps-1')
+      const dps = { sessionId: 'run-dps-1-g1' }
+      const lease = service.claimTask(dps, 'run', 'task')
+      manager.beginLeaseAudit(dps, 'run', 'task', lease.leaseId)
+
+      // External noise (e.g. another process) lands after the claim baseline.
+      writeFileSync(join(root, 'README.md'), 'escaped\n')
+      const report = (leaseVersion: number) => ({
+        taskId: 'task', taskVersion: 1, leaseId: lease.leaseId, leaseVersion,
+        slot: 'dps-1' as const, generation: 1, status: 'completed' as const, summary: 'done',
+        changedFiles: [], evidence: ['done'], commandsRun: [], risks: [], remainingWork: [],
+      })
+      expect(() => manager.auditWorkspaceBeforeSubmit(dps, 'run', report(1)))
+        .toThrowError(expect.objectContaining({ code: 'ACTUAL_WRITE_SCOPE_VIOLATION' }))
+
+      // The DPS submits a checkpoint: the lease renews and the audit baseline
+      // must reset so historical noise no longer blocks the submit.
+      service.submitCheckpoint(dps, 'run', {
+        checkpointId: 'cp-1', taskId: 'task', taskVersion: 1,
+        leaseId: lease.leaseId, leaseVersion: 1, slot: 'dps-1',
+        completed: ['step'], nextSteps: ['next'], evidenceDelta: ['progress'], blockers: [],
+        workspaceFingerprint: 'v1',
+      })
+      manager.refreshLeaseAudit('run', 'task')
+      expect(() => manager.auditWorkspaceBeforeSubmit(dps, 'run', report(2))).not.toThrow()
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
