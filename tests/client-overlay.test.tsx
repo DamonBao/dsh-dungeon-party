@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { act, create } from 'react-test-renderer'
 import { describe, expect, it, vi } from 'vitest'
 
-import { DungeonPartyOverlay, inject } from '../client/index.js'
+import { DungeonPartyOverlay, inject, memberMeters } from '../client/index.js'
 import { DungeonService } from '../src/service/dungeon-service.js'
 import { MemoryDungeonEventStore } from '../src/service/memory-event-store.js'
 
@@ -22,6 +22,21 @@ function runProjection() {
 describe('DungeonPartyOverlay', () => {
   it('waits for client Cordis services rather than package ids', () => {
     expect(inject).toEqual(['slots', 'sessions'])
+  })
+
+  it('maps role state to visible health, work meters, and activity labels', () => {
+    const run = runProjection()
+    Object.assign(run.slots['dps-1'], {
+      currentSessionId: 'dps', lifeState: 'alive', readiness: 'healthy', activityState: 'running',
+    })
+    expect(memberMeters(run, 'dps-1')).toMatchObject({
+      health: 100, resource: 88, resourceName: '任务输出', activityLabel: '执行中',
+    })
+
+    Object.assign(run.slots['dps-1'], { readiness: 'degraded', activityState: 'stopped' })
+    expect(memberMeters(run, 'dps-1')).toMatchObject({ health: 68, resource: 14, activityLabel: '已停滞' })
+    run.commanderLoad = 'pressured'
+    expect(memberMeters(run, 'tank')).toMatchObject({ resource: 68, resourceName: '指挥压力' })
   })
 
   it('stays absent outside dungeon sessions', () => {
@@ -52,6 +67,9 @@ describe('DungeonPartyOverlay', () => {
 
   it('uses a compact width and supports dragging the panel header', () => {
     const run = runProjection()
+    Object.assign(run.slots['dps-1'], {
+      currentSessionId: 'dps', lifeState: 'alive', readiness: 'healthy', activityState: 'running',
+    })
     const useSessions = ((selector: (state: never) => unknown) => selector({
       ids: ['tank'], byId: { tank: { id: 'tank', displayTitle: 'Tank', running: true, blank: false, updatedAt: 0,
         projectionValues: { 'dungeon-party': run } } }, current: 'tank', phase: 'ready',
@@ -62,6 +80,8 @@ describe('DungeonPartyOverlay', () => {
     expect(panel.props.style).toMatchObject({ width: 348, height: 640, transform: 'translate3d(0px, 0px, 0)' })
     expect(renderer.root.findAll((node) => typeof node.props.className === 'string' && node.props.className.split(' ').includes('dp-member'))).toHaveLength(5)
     expect(renderer.root.findAllByProps({ 'aria-label': '打开副本面板' })).toHaveLength(0)
+    expect(renderer.root.findByProps({ 'data-activity': 'running' })).toBeTruthy()
+    expect(renderer.root.findByProps({ 'aria-label': '焰刃 · Pyra 任务输出' }).props['aria-valuenow']).toBe(88)
 
     const header = renderer.root.findByProps({ className: 'dp-header' })
     const capture = vi.fn()

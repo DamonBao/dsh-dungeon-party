@@ -265,6 +265,14 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     'dungeon-party': DungeonRun | null;
   }
 }
+interface MemberMeters {
+  health: number;
+  resource: number;
+  resourceName: string;
+  activityLabel: string;
+}
+/** Convert durable service state into role-specific, human-readable meters. */
+declare function memberMeters(run: DungeonRun, slot: PartySlot): MemberMeters;
 interface DungeonPartyOverlayProps extends PropsRuntime<'shell.overlay'> {
   requestAction: (instruction: string) => Promise<boolean>;
 }
@@ -275,4 +283,4 @@ declare function DungeonPartyOverlay({
 declare const inject: string[];
 declare function apply(ctx: ClientContext): void;
 //#endregion
-export { DungeonPartyOverlay, apply, inject };
+export { DungeonPartyOverlay, MemberMeters, apply, inject, memberMeters };
