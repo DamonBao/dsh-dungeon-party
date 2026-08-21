@@ -20,7 +20,9 @@ DSH「五人本模式」插件，按固定的 1T、3DPS、1 奶逻辑队伍编�
 - `telemetry` / `aggregate` / `serial` Scope 模式解析及严格模式写 Lease 串行门禁；
 - 宿主计算的确定性 Workspace Fingerprint、Lease 基线/差分快照、文件工具写入前 Scope Guard、事件游标长轮询、结构化队内消息和主动 Checkpoint 请求；
 - Lease 过期与并发 DPS 门禁、全局命令单一归属、运行时 Turn/Agent 故障信号和自动战复通知；
-- 可选 Web 客户端副本浮层，通过 Lead Session 的 `dungeon-party` whole-value projection 展示阶段、队伍、任务、验收与战复摘要。
+- rc8 ModuleLoader 客户端 bundle 与 WoW 风格「永夜堡垒」活动面板：职业化队伍框架、生命/活跃条、任务日志、依赖提示、战报时间线与确认式领队技能；
+- 队伍成员采用 Aegis / Pyra / Nyx / Aster / Lumina 角色名与专属 Persona；
+- 借鉴 Agent Teams 的事件驱动调度思路：进入执行阶段自动把 ready work 派给空闲 DPS，任务提交后再次 kick scheduler；仍保留本插件更严格的槽位、Lease、Scope、验收与战复门禁。
 
 ## 安装
 
@@ -40,4 +42,4 @@ npm run typecheck
 npm run build
 ```
 
-完整需求见 [`docs/dsh-dungeon-party-prd.md`](docs/dsh-dungeon-party-prd.md)。后续切片继续实现 Session 级逐写遥测、跨实例原子事件追加/崩溃注入补偿，以及 P1 Web 面板的确认式控制操作、DAG 与时间线增强。
+完整需求见 [`docs/dsh-dungeon-party-prd.md`](docs/dsh-dungeon-party-prd.md)。后续切片继续实现 Session 级逐写遥测、跨实例原子事件追加/崩溃注入补偿、离线消息确认重试，以及更完整的 DAG 连线与历史回放。
