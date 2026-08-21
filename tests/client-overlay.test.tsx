@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { act, create } from 'react-test-renderer'
 import { describe, expect, it, vi } from 'vitest'
 
-import { DungeonPartyOverlay } from '../client/index.js'
+import { DungeonPartyOverlay, inject } from '../client/index.js'
 import { DungeonService } from '../src/service/dungeon-service.js'
 import { MemoryDungeonEventStore } from '../src/service/memory-event-store.js'
 
@@ -20,6 +20,10 @@ function runProjection() {
 }
 
 describe('DungeonPartyOverlay', () => {
+  it('waits for client Cordis services rather than package ids', () => {
+    expect(inject).toEqual(['slots', 'sessions'])
+  })
+
   it('stays absent outside dungeon sessions', () => {
     const html = renderToStaticMarkup(<DungeonPartyOverlay requestAction={async () => true} useSessions={(selector) => selector({
       ids: [], byId: {}, current: undefined, phase: 'ready', subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined,

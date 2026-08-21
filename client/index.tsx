@@ -196,7 +196,7 @@ export function DungeonPartyOverlay({ useSessions, requestAction }: DungeonParty
   </div>
 }
 
-export const inject = ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-ui-layout']
+export const inject = ['slots', 'sessions']
 
 function installStyles(): () => void {
   const id = 'dsh-dungeon-party/styles'
