@@ -3,6 +3,10 @@ import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
+import { registerDungeonSessionEventTypes } from './session-event-compat.js'
+
+// Loader module evaluation precedes user-triggered cold history reads.
+registerDungeonSessionEventTypes()
 
 /** Stable host plugin name for the preset bootstrap. */
 export const name = 'dungeon-party-preset-sync'

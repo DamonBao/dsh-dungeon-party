@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 
 import {
   bundledPresetDirectory,
@@ -16,6 +17,11 @@ afterEach(() => {
 })
 
 describe('dungeon-party preset bootstrap', () => {
+  it('registers persisted dungeon events before cold history reads', () => {
+    expect(KNOWN_SESSION_EVENT_TYPES.has('dungeon/event')).toBe(true)
+    expect(KNOWN_SESSION_EVENT_TYPES.has('dungeon/projection')).toBe(true)
+  })
+
   it('resolves DSH_HOME using the launcher convention', () => {
     expect(resolveDshHome({ DSH_HOME: '~/custom-dsh' }, '/Users/tester'))
       .toBe('/Users/tester/custom-dsh')

@@ -13,6 +13,9 @@ import {
 import { PartyAgentManager } from './adapters/party-agent-manager.js'
 import { SessionDungeonEventStore } from './adapters/session-event-store.js'
 import { registerDungeonTools } from './tools/register.js'
+import { registerDungeonSessionEventTypes } from './session-event-compat.js'
+
+registerDungeonSessionEventTypes()
 
 export interface DungeonPartyPluginConfig {
   dungeon?: Partial<DungeonConfig>
