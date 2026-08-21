@@ -14,4 +14,4 @@ export declare function bundledPresetDirectory(): string;
  */
 export declare function syncDungeonPartyPreset(home?: string): string;
 /** Host-plane bootstrap loaded with the profile bundle. */
-export declare function apply(ctx: Context): void;
+export declare function apply(ctx: Context): Promise<void>;

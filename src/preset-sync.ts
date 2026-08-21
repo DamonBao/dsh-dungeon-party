@@ -3,7 +3,10 @@ import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
-import { registerDungeonSessionEventTypes } from './session-event-compat.js'
+import {
+  registerDungeonSessionEventTypes,
+  registerHostDungeonSessionEventTypes,
+} from './session-event-compat.js'
 
 // Loader module evaluation precedes user-triggered cold history reads.
 registerDungeonSessionEventTypes()
@@ -62,7 +65,9 @@ export function syncDungeonPartyPreset(home: string = resolveDshHome()): string 
 }
 
 /** Host-plane bootstrap loaded with the profile bundle. */
-export function apply(ctx: Context): void {
+export async function apply(ctx: Context): Promise<void> {
+  if (!ctx.baseUrl) throw new Error('dungeon-party: host baseUrl is required for Session event compatibility')
+  await registerHostDungeonSessionEventTypes(ctx.baseUrl)
   try {
     const target = syncDungeonPartyPreset()
     ctx.logger.info(`dungeon-party: preset synced into ${target}`)
