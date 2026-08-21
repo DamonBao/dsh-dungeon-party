@@ -1,6 +1,6 @@
 {
   "name": "dsh-dungeon-party",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "DSH five-agent dungeon party orchestration plugin",
   "type": "module",
   "main": "./lib/preset-sync.js",
