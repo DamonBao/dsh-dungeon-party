@@ -23,6 +23,9 @@ declare module '@deepseek-ai/cordis' {
     }
 }
 declare module '@deepseek-ai/dsh-session-projection' {
+    interface SessionProjectionStateMap {
+        'dungeon-party': DungeonRun | null;
+    }
     interface SessionProjectionMap {
         'dungeon-party': DungeonRun | null;
     }

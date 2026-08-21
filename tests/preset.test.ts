@@ -13,7 +13,7 @@ describe('dungeon-party agent preset', () => {
     const group = composition.find((row) => row.id === 'dungeon-party-runtime')
     expect(group).toMatchObject({ name: 'cordis:group', group: true, isolate: { dungeonParty: true } })
     expect(group?.config).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: 'dungeon-party', name: 'dsh-dungeon-party/runtime' }),
+      expect.objectContaining({ id: 'dungeon-party', name: '@jcy2387/dsh-dungeon-party/runtime' }),
     ]))
   })
 

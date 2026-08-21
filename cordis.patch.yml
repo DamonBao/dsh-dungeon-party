@@ -5,4 +5,4 @@
     - id: dungeon-party-preset-sync
       # Root package entry is required for rc8 dsh.client discovery. Its host
       # face only syncs the preset; the runtime remains agent-scoped below.
-      name: dsh-dungeon-party
+      name: '@jcy2387/dsh-dungeon-party'

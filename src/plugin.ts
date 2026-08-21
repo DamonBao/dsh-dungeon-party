@@ -36,6 +36,9 @@ declare module '@deepseek-ai/cordis' {
 }
 
 declare module '@deepseek-ai/dsh-session-projection' {
+  interface SessionProjectionStateMap {
+    'dungeon-party': DungeonRun | null
+  }
   interface SessionProjectionMap {
     'dungeon-party': DungeonRun | null
   }
@@ -92,14 +95,18 @@ export class DungeonPartyService extends Service {
   constructor(ctx: Context, config: DungeonPartyPluginConfig = {}) {
     super(ctx, 'dungeonParty')
     ctx.inject(['sessionProjections'], (projectionCtx) => {
+      const schema = wireSchema.custom<DungeonRun | null>((value) => value === null || (
+        typeof value === 'object' && value !== null && typeof (value as { id?: unknown }).id === 'string'
+      ))
       projectionCtx.sessionProjections.register({
         key: 'dungeon-party',
-        schema: wireSchema.custom<DungeonRun | null>((value) => value === null || (
-          typeof value === 'object' && value !== null && typeof (value as { id?: unknown }).id === 'string'
-        )),
+        stateSchema: schema,
         init: () => null,
         apply: applyDungeonProjection,
-        view: (state) => state,
+        wire: {
+          viewSchema: schema,
+          view: (state) => state,
+        },
         stateVersion: 1,
       })
     })
