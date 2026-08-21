@@ -6,11 +6,12 @@ const root = new URL('../', import.meta.url)
 describe('DSH rc8 client bundle', () => {
   it('publishes the module-loader closure artifact expected by dsh web', async () => {
     const pkg = JSON.parse(await readFile(new URL('package.json', root), 'utf8')) as {
-      exports: Record<string, { default?: string }>
+      exports: Record<string, { default?: string } | string>
     }
-    expect(pkg.exports['./client']?.default).toBe('./lib/client.js')
-    expect(pkg.exports['.']?.default).toBe('./lib/preset-sync.js')
-    expect(pkg.exports['./runtime']?.default).toBe('./lib/index.js')
+    expect((pkg.exports['./client'] as { default?: string })?.default).toBe('./lib/client.js')
+    expect((pkg.exports['.'] as { default?: string })?.default).toBe('./lib/preset-sync.js')
+    expect((pkg.exports['./runtime'] as { default?: string })?.default).toBe('./lib/index.js')
+    expect(pkg.exports['./package.json']).toBe('./package.json')
 
     const hostPatch = await readFile(new URL('cordis.patch.yml', root), 'utf8')
     expect(hostPatch).toContain('name: dsh-dungeon-party')

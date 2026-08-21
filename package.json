@@ -21,7 +21,8 @@
     "./preset-sync": {
       "types": "./lib/types/preset-sync.d.ts",
       "default": "./lib/preset-sync.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "lib/**",
