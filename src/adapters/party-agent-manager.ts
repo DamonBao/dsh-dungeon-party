@@ -30,10 +30,10 @@ const roleTools: Record<ChildSlot, string[]> = {
 }
 
 const rolePersonas: Record<ChildSlot, string> = {
-  'dps-1': 'You are Executor (DPS-1). Execute only your structured work order and active lease. Re-read files before editing, stay inside writeScopes, submit evidence and checkpoints, and never claim the whole run is complete.',
-  'dps-2': 'You are Executor (DPS-2). Execute only your structured work order and active lease. Re-read files before editing, stay inside writeScopes, submit evidence and checkpoints, and never claim the whole run is complete.',
-  'dps-3': 'You are Executor (DPS-3). Execute only your structured work order and active lease. Re-read files before editing, stay inside writeScopes, submit evidence and checkpoints, and never claim the whole run is complete.',
-  healer: 'You are the independent Validator (Healer). Inspect the current manifest and evidence, submit a complete validation report, and perform only authorized maintenance or resurrection. Do not modify implementation files or impersonate the Commander.',
+  'dps-1': 'You are Pyra the Flameblade, the party’s Flame Engineer Executor (DPS-1). Execute only your structured work order and active lease. Re-read files before editing, stay inside writeScopes, submit evidence and checkpoints, and never claim the whole run is complete.',
+  'dps-2': 'You are Nyx the Shadowstrider, the party’s Shadow Scout Executor (DPS-2). Execute only your structured work order and active lease. Re-read files before editing, stay inside writeScopes, submit evidence and checkpoints, and never claim the whole run is complete.',
+  'dps-3': 'You are Aster the Starweaver, the party’s Arcane Architect Executor (DPS-3). Execute only your structured work order and active lease. Re-read files before editing, stay inside writeScopes, submit evidence and checkpoints, and never claim the whole run is complete.',
+  healer: 'You are Lumina the Oracle, the independent Holy Adjudicator Validator (Healer). Inspect the current manifest and evidence, submit a complete validation report, and perform only authorized maintenance or resurrection. Do not modify implementation files or impersonate the Commander.',
 }
 
 export class PartyAgentManager {
@@ -65,6 +65,52 @@ export class PartyAgentManager {
       }],
       source: { kind: 'plugin', plugin: 'dsh-dungeon-party', form: 'relay' },
     }), 'next-turn', true)
+  }
+
+  async kickScheduler(runId: string): Promise<string[]> {
+    const run = this.service.getRun(runId)
+    const tankSessionId = run.slots.tank.currentSessionId
+    if (!tankSessionId) return []
+    try {
+      return await this.dispatchAvailableTasks({ sessionId: tankSessionId }, runId)
+    } catch {
+      // Scheduling is best-effort after a committed state transition. A later
+      // status/phase/task event can safely kick it again without duplicating work.
+      return []
+    }
+  }
+
+  async dispatchAvailableTasks(actor: Actor, runId: string): Promise<string[]> {
+    const assigned: string[] = []
+    const run = this.service.getRunForActor(actor, runId)
+    if (run.phase !== 'EXECUTING' && run.phase !== 'REPAIR') return assigned
+    const busySlots = new Set(Object.values(run.tasks)
+      .filter((task) => task.status === 'running' && task.ownerSlot)
+      .map((task) => task.ownerSlot))
+    const freeSlots = (['dps-1', 'dps-2', 'dps-3'] as const).filter((slot) => !busySlots.has(slot))
+    const priority = { critical: 0, high: 1, normal: 2, low: 3 } as const
+    const readyTasks = Object.values(run.tasks)
+      .filter((task) => ['pending', 'ready'].includes(task.status) && !task.ownerSlot)
+      .sort((left, right) => priority[left.workOrder.priority] - priority[right.workOrder.priority])
+
+    for (const task of readyTasks) {
+      const slot = freeSlots.shift()
+      if (!slot) break
+      try {
+        this.service.preflightTaskAssignment(actor, runId, task.workOrder.id, slot)
+        await this.ensureMember(actor, runId, slot)
+        this.service.assignTask(actor, runId, task.workOrder.id, slot)
+        this.dispatchTask(actor, runId, task.workOrder.id)
+        assigned.push(task.workOrder.id)
+      } catch (error) {
+        if (error instanceof DungeonError && ['SCOPE_OVERLAP', 'MAX_CONCURRENCY', 'TASK_NOT_READY', 'TASK_NOT_ASSIGNABLE', 'UNMET_DEPENDENCY'].includes(error.code)) {
+          freeSlots.unshift(slot)
+          continue
+        }
+        throw error
+      }
+    }
+    return assigned
   }
 
   async executeValidatorMaintenance(actor: Actor, runId: string): Promise<void> {

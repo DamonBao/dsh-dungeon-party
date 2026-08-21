@@ -13,6 +13,8 @@ export declare class PartyAgentManager {
     private readonly pending;
     constructor(service: DungeonService, agents: AgentRegistry, presets: AgentPresets);
     prepareForPhase(actor: Actor, runId: string, phase: RunPhase): Promise<void>;
+    kickScheduler(runId: string): Promise<string[]>;
+    dispatchAvailableTasks(actor: Actor, runId: string): Promise<string[]>;
     executeValidatorMaintenance(actor: Actor, runId: string): Promise<void>;
     dispatchBattleRes(actor: Actor, runId: string, resurrectionId: string): void;
     dispatchCommanderRescue(runId: string, ticketId: string): void;

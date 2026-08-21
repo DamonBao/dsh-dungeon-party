@@ -105,6 +105,29 @@ describe('PartyAgentManager', () => {
     expect(sections.at(-1)?.text).toContain('Executor')
   })
 
+  it('auto-dispatches ready work to free DPS slots after execution begins', async () => {
+    const { service, manager, send } = setup()
+    const tank = { sessionId: 'tank' }
+    service.changePhase(tank, 'run', 'PLANNING')
+    service.createTask(tank, 'run', {
+      id: 'task-1', runId: 'run', version: 1, title: 'Forge the feature', objective: 'Implement it',
+      inputs: [], constraints: [], acceptanceCriteria: [{ id: 'criterion-1', description: 'Done', required: true }],
+      readScopes: ['src/**'], writeScopes: ['src/**'], globalCommands: [], blockedBy: [], expectedArtifacts: [],
+      priority: 'normal', required: true,
+    })
+    await manager.prepareForPhase(tank, 'run', 'EXECUTING')
+    service.changePhase(tank, 'run', 'EXECUTING')
+
+    await manager.dispatchAvailableTasks(tank, 'run')
+
+    expect(service.getRun('run').tasks['task-1']).toMatchObject({ ownerSlot: 'dps-1' })
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ content: [expect.objectContaining({ text: expect.stringContaining('task-1') })] }),
+      'next-turn',
+      true,
+    )
+  })
+
   it('resumes a persisted bound child after manager restart instead of duplicating it', async () => {
     const { service, manager, agents, presets, resume, create } = setup()
     const tank = { sessionId: 'tank' }

@@ -12,7 +12,7 @@
     },
     "./client": {
       "types": "./lib/client/index.d.ts",
-      "default": "./lib/client/index.js"
+      "default": "./lib/client.js"
     },
     "./preset-sync": {
       "types": "./lib/types/preset-sync.d.ts",
@@ -26,7 +26,8 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && npm run build:client",
-    "build:client": "tsdown client/index.tsx --format esm --platform browser --dts --out-dir lib/client --external react --external react/jsx-runtime --external @deepseek-ai/dsh-client-runtime --external @deepseek-ai/dsh-client-ui-layout --external @deepseek-ai/dsh-client-ui-slots --external node:path",
+    "build:client": "npm run build:client:types && tsdown",
+    "build:client:types": "tsdown --no-config client/index.tsx --format esm --platform browser --dts --out-dir lib/client --external react --external react/jsx-runtime --external @deepseek-ai/dsh-client-runtime --external @deepseek-ai/dsh-client-ui-layout --external @deepseek-ai/dsh-client-ui-slots --external node:path",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
@@ -94,5 +95,12 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
+  },
+  "dshClient": {
+    "inject": [
+      "@deepseek-ai/dsh-client-runtime",
+      "@deepseek-ai/dsh-client-ui-layout"
+    ],
+    "platform": "web"
   }
 }

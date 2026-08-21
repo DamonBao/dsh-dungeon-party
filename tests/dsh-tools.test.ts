@@ -172,6 +172,31 @@ describe('DSH dungeon tools', () => {
     })
   })
 
+  it('derives technical lease fields for minimal DPS execution reports', async () => {
+    const { definitions, service } = setup()
+    const start = definitions.find((definition) => definition.name === 'party_start')!
+    const submit = definitions.find((definition) => definition.name === 'work_submit')!
+    await start.execute({ runId: 'run', objective: 'Build', workspaceRoot: process.cwd() }, execution('tank'))
+    service.bindMember({ sessionId: 'tank' }, 'run', 'healer', 'healer')
+    service.bindMember({ sessionId: 'tank' }, 'run', 'dps-1', 'dps')
+    service.changePhase({ sessionId: 'tank' }, 'run', 'PLANNING')
+    service.createTask({ sessionId: 'tank' }, 'run', {
+      id: 'task-1', runId: 'run', version: 1, title: 'Task', objective: 'Implement', inputs: [], constraints: [],
+      acceptanceCriteria: [{ id: 'criterion-1', description: 'Done', required: true }], readScopes: [], writeScopes: [],
+      globalCommands: [], blockedBy: [], expectedArtifacts: [], priority: 'normal', required: true,
+    })
+    service.changePhase({ sessionId: 'tank' }, 'run', 'EXECUTING')
+    service.assignTask({ sessionId: 'tank' }, 'run', 'task-1', 'dps-1')
+    service.claimTask({ sessionId: 'dps' }, 'run', 'task-1')
+
+    await expect(submit.execute({
+      runId: 'run', report: { taskId: 'task-1', evidence: ['Tests passed'] },
+    }, execution('dps'))).resolves.toMatchObject({ status: 'completed' })
+    expect(service.getRun('run').tasks['task-1']?.executionReports[0]).toMatchObject({
+      slot: 'dps-1', generation: 1, taskVersion: 1, status: 'completed', evidence: ['Tests passed'],
+    })
+  })
+
   it('rejects tool calls without an authenticated agent identity', async () => {
     const { definitions } = setup()
     const start = definitions.find((definition) => definition.name === 'party_start')!

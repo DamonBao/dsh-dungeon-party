@@ -39,7 +39,10 @@ describe('DungeonPartyOverlay', () => {
       } as never,
       current: 'tank' as never, phase: 'ready', subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined,
     })} useWorkspaces={(() => undefined) as never} />)
-    expect(html).toContain('副本 · FORMING')
+    expect(html).toContain('集结队伍')
+    expect(html).toContain('永夜堡垒 · 五人突击队')
+    expect(html).toContain('守誓者 · Aegis')
+    expect(html).toContain('圣谕者 · Lumina')
     expect(html).toContain('aria-label="打开副本面板"')
   })
 
@@ -60,8 +63,8 @@ describe('DungeonPartyOverlay', () => {
       useWorkspaces={(() => undefined) as never}
     />)
 
-    act(() => renderer.root.findByProps({ 'aria-label': '打开副本面板' }).props.onClick())
-    act(() => renderer.root.findAllByType('button').find((button) => button.children.includes('指示奶自我稳定'))!.props.onClick())
+    act(() => renderer.root.findAllByType('button').find((button) => button.children.includes('指挥'))!.props.onClick())
+    act(() => renderer.root.findAllByProps({ className: 'dp-button' })[1]!.props.onClick())
     expect(requestAction).not.toHaveBeenCalled()
     expect(renderer.root.findByProps({ role: 'alertdialog' })).toBeTruthy()
 
