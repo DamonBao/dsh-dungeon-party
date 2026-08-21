@@ -32,6 +32,24 @@ describe('dungeon-party agent preset', () => {
     })
   })
 
+  it('mounts the standard rc8 compaction command and bounded tool-result pruner', async () => {
+    const composition = load(await readFile(new URL('agent.cordis.yml', presetRoot), 'utf8')) as Array<Record<string, unknown>>
+    const group = composition.find((row) => row.id === 'compaction')
+    expect(group).toMatchObject({
+      name: 'cordis:group',
+      group: true,
+      isolate: { compaction: true, toolResultPruner: true },
+    })
+    expect(group?.config).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: '@deepseek-ai/dsh-compaction-basic' }),
+      expect.objectContaining({ name: '@deepseek-ai/dsh-command-compact' }),
+      expect.objectContaining({
+        name: '@deepseek-ai/dsh-compaction-tool-result-pruner',
+        config: expect.objectContaining({ thresholdChars: 8192 }),
+      }),
+    ]))
+  })
+
   it('publishes the optional Web client overlay entry', async () => {
     const pkg = JSON.parse(await readFile(new URL('../../package.json', presetRoot), 'utf8')) as {
       exports: Record<string, unknown>

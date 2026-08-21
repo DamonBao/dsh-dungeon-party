@@ -59,7 +59,7 @@ describe('DungeonPartyOverlay', () => {
     } as never)) as never
     const renderer = create(<DungeonPartyOverlay requestAction={async () => true} useSessions={useSessions} useWorkspaces={(() => undefined) as never} />)
     const panel = renderer.root.findByProps({ role: 'dialog' })
-    expect(panel.props.style).toMatchObject({ width: 348, height: 600, transform: 'translate3d(0px, 0px, 0)' })
+    expect(panel.props.style).toMatchObject({ width: 348, height: 640, transform: 'translate3d(0px, 0px, 0)' })
     expect(renderer.root.findAll((node) => typeof node.props.className === 'string' && node.props.className.split(' ').includes('dp-member'))).toHaveLength(5)
     expect(renderer.root.findAllByProps({ 'aria-label': '打开副本面板' })).toHaveLength(0)
 
@@ -78,7 +78,7 @@ describe('DungeonPartyOverlay', () => {
     const heightResize = renderer.root.findByProps({ 'aria-label': '调整副本面板高度' })
     act(() => heightResize.props.onPointerDown({ button: 0, pointerId: 3, clientY: 100, stopPropagation: vi.fn(), currentTarget: { setPointerCapture: vi.fn() } }))
     act(() => heightResize.props.onPointerMove({ pointerId: 3, clientY: 140 }))
-    expect(renderer.root.findByProps({ role: 'dialog' }).props.style.height).toBe(640)
+    expect(renderer.root.findByProps({ role: 'dialog' }).props.style.height).toBe(680)
 
     act(() => renderer.root.findByProps({ 'aria-label': '关闭副本面板' }).props.onClick({ stopPropagation: vi.fn() }))
     expect(renderer.root.findAllByProps({ role: 'dialog' })).toHaveLength(0)
