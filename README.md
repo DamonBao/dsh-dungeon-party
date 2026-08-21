@@ -42,4 +42,13 @@ npm run typecheck
 npm run build
 ```
 
+## 单进程持久化契约
+
+当前实现的持久化语义以「单个 DSH 进程」为边界，请勿跨实例并发驱动同一副本：
+
+- 事件序号由服务进程内的计数器原子分配；派发互斥（同一任务同时至多一个有效写 lease）与 Session Log 追加校验（序号必须等于 `最后序号 + 1`）同样是进程内语义。
+- 跨实例并发写同一 run 不会被自动串行化：后到的一方会以 `EVENT_SEQUENCE_CONFLICT`（重复幂等键则为 `EVENT_ID_CONFLICT`）被拒绝，需要人工介入修复后重放，而不是静默合并。
+- `lib/` 构建产物直接入库，换取安装即用、免编译的确定性；代价是源码改动后若忘记重新构建，仓库中的产物会短暂过期。
+- `npm publish` 由 `prepublishOnly` 脚本守卫：发布前强制执行 `typecheck → test → build`，任何一步失败都会中止发布，保证发布的 `lib/` 始终与源码同步。
+
 完整需求见 [`docs/dsh-dungeon-party-prd.md`](docs/dsh-dungeon-party-prd.md)。后续切片继续实现 Session 级逐写遥测、跨实例原子事件追加/崩溃注入补偿、离线消息确认重试，以及更完整的 DAG 连线与历史回放。

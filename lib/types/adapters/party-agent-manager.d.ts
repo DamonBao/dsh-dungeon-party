@@ -16,6 +16,8 @@ export declare class PartyAgentManager {
     private readonly dispatchLocks;
     /** Rate-limits dangling-lease turn-end nudges per session. */
     private readonly turnEndNudges;
+    /** Last taskSetVersion per run for which a drained-execution notice fired. */
+    private readonly drainNoticeTaskSetVersions;
     /** Agent contexts that already carry the execution guard. */
     private readonly guardedContexts;
     /** Unexpected scheduler errors, kept for diagnostics instead of failing post-commit flows. */
@@ -47,6 +49,16 @@ export declare class PartyAgentManager {
     nudgeAfterTurnEnd(sessionId: string): void;
     private withDispatchLock;
     private dispatchAvailableTasksUnlocked;
+    /**
+     * Orchestration loop closure: when a dispatch pass ends with the run fully
+     * drained (EXECUTING/REPAIR, no pending/ready/running task, no active
+     * lease, no in-flight recovery, and every required task completed), nudge
+     * the tank Agent to call party_health and move the party toward
+     * VALIDATING. The notice never mutates run state and is deduplicated per
+     * runId+taskSetVersion so repeated kicks stay quiet until the task set
+     * changes. Strictly best-effort: it must never break the scheduler.
+     */
+    private notifyDrainedExecution;
     executeValidatorMaintenance(actor: Actor, runId: string): Promise<void>;
     dispatchBattleRes(actor: Actor, runId: string, resurrectionId: string): void;
     dispatchCommanderRescue(runId: string, ticketId: string): void;

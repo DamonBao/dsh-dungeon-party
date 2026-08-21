@@ -8,9 +8,31 @@ export const DUNGEON_SESSION_EVENT_TYPES = [
   'dungeon/projection',
 ] as const
 
-function addDungeonTypes(vocabulary: ReadonlySet<string>): void {
-  const mutable = vocabulary as Set<string>
-  for (const type of DUNGEON_SESSION_EVENT_TYPES) mutable.add(type)
+let warnedReadOnlyVocabulary = false
+
+function warnReadOnlyVocabulary(error: unknown): void {
+  if (warnedReadOnlyVocabulary) return
+  warnedReadOnlyVocabulary = true
+  console.warn(
+    `[dsh-dungeon-party] Could not register dungeon session event types (${DUNGEON_SESSION_EVENT_TYPES.join(', ')}) with a read-only host vocabulary; the host may reject dungeon event persistence.`,
+    error,
+  )
+}
+
+/**
+ * Defensive vocabulary registration: existing types are skipped without
+ * mutating anything, and a frozen or otherwise read-only vocabulary never
+ * throws — the failure degrades to a single warning instead.
+ */
+export function addDungeonTypes(vocabulary: ReadonlySet<string>): void {
+  for (const type of DUNGEON_SESSION_EVENT_TYPES) {
+    if (vocabulary.has(type)) continue
+    try {
+      ;(vocabulary as Set<string>).add(type)
+    } catch (error) {
+      warnReadOnlyVocabulary(error)
+    }
+  }
 }
 
 /** Register against this package's module instance (direct/runtime mounts). */

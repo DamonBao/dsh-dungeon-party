@@ -48,6 +48,8 @@ export class PartyAgentManager {
   private readonly dispatchLocks = new Map<string, Promise<unknown>>()
   /** Rate-limits dangling-lease turn-end nudges per session. */
   private readonly turnEndNudges = new Map<string, number>()
+  /** Last taskSetVersion per run for which a drained-execution notice fired. */
+  private readonly drainNoticeTaskSetVersions = new Map<string, number>()
   /** Agent contexts that already carry the execution guard. */
   private readonly guardedContexts = new WeakSet<Context>()
   /** Unexpected scheduler errors, kept for diagnostics instead of failing post-commit flows. */
@@ -255,7 +257,55 @@ export class PartyAgentManager {
         throw error
       }
     }
+    this.notifyDrainedExecution(runId)
     return assigned
+  }
+
+  /**
+   * Orchestration loop closure: when a dispatch pass ends with the run fully
+   * drained (EXECUTING/REPAIR, no pending/ready/running task, no active
+   * lease, no in-flight recovery, and every required task completed), nudge
+   * the tank Agent to call party_health and move the party toward
+   * VALIDATING. The notice never mutates run state and is deduplicated per
+   * runId+taskSetVersion so repeated kicks stay quiet until the task set
+   * changes. Strictly best-effort: it must never break the scheduler.
+   */
+  private notifyDrainedExecution(runId: string): void {
+    try {
+      const run = this.service.getRun(runId)
+      if (run.phase !== 'EXECUTING' && run.phase !== 'REPAIR') return
+      if (this.drainNoticeTaskSetVersions.get(runId) === run.taskSetVersion) return
+      const tasks = Object.values(run.tasks)
+      if (tasks.length === 0) return
+      // Open work still exists: undispatched tasks (including ones parked on
+      // unmet dependencies) or any dangling lease keeps the run busy.
+      const hasOpenWork = tasks.some((task) =>
+        task.status === 'pending' || task.status === 'ready' || task.status === 'running' || task.activeLease,
+      )
+      if (hasOpenWork) return
+      // Optional tasks reported blocked/failed do not gate VALIDATING, so
+      // only incomplete required tasks hold the notice back.
+      if (tasks.some((task) => task.workOrder.required && task.status !== 'completed')) return
+      const recoveryInFlight =
+        run.resurrectionRequests.some((request) => request.status === 'issued' || request.status === 'consumed') ||
+        run.commanderRescueTickets.some((ticket) => ticket.status === 'issued' || ticket.status === 'consumed') ||
+        run.recoveryInstructions.some((instruction) => instruction.status === 'issued')
+      if (recoveryInFlight) return
+      const tankSessionId = run.slots.tank.currentSessionId
+      if (!tankSessionId) return
+      const tankAgent = this.agents.get(tankSessionId as SessionId)
+      if (!tankAgent) return
+      const text = run.phase === 'REPAIR'
+        ? `Run ${runId} repair dispatch is drained (taskSetVersion ${run.taskSetVersion}): every required task is completed and nothing is pending, ready, running, leased, or under recovery. Call party_health to confirm party state, then judge whether the repaired workspace warrants re-acceptance via party_phase VALIDATING or further repair planning. A drained repair queue is not completion by itself; this notice does not change any run state.`
+        : `Run ${runId} execution dispatch is drained (taskSetVersion ${run.taskSetVersion}): every required task is completed and nothing is pending, ready, running, leased, or under recovery. Call party_health to confirm party state, then open acceptance with party_phase VALIDATING so the healer can validate the current workspace independently. This notice does not change any run state.`
+      tankAgent.send(createUserMessage({
+        content: [{ type: 'text', text }],
+        source: { kind: 'plugin', plugin: 'dsh-dungeon-party', form: 'relay' },
+      }), 'next-step', true)
+      this.drainNoticeTaskSetVersions.set(runId, run.taskSetVersion)
+    } catch {
+      // Best-effort only: drain noticing must never throw into kickScheduler.
+    }
   }
 
   async executeValidatorMaintenance(actor: Actor, runId: string): Promise<void> {
@@ -670,6 +720,7 @@ export class PartyAgentManager {
     for (const key of this.leaseAudits.keys()) {
       if (key.startsWith(prefix)) this.leaseAudits.delete(key)
     }
+    this.drainNoticeTaskSetVersions.delete(runId)
     const commanderHandle = this.commanderHandles.get(runId)
     if (commanderHandle) {
       this.commanderHandles.delete(runId)
@@ -683,6 +734,7 @@ export class PartyAgentManager {
     this.handles.clear()
     this.commanderHandles.clear()
     this.leaseAudits.clear()
+    this.drainNoticeTaskSetVersions.clear()
     await Promise.all(handles.map((handle) => handle.dispose()))
   }
 

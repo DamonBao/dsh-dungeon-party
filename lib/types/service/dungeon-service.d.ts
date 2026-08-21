@@ -395,7 +395,7 @@ export declare class DungeonService {
     observeWorkspaceFingerprint(runId: string, workspaceFingerprint: string): DungeonRun;
     createValidationManifest(actor: Actor, runId: string, workspaceFingerprint: string): ValidationManifest;
     submitValidation(actor: Actor, runId: string, submission: ValidationSubmission): ValidationReport;
-    finishRun(actor: Actor, runId: string, resultSummary: string, workspaceFingerprint: string): DungeonRun;
+    finishRun(actor: Actor, runId: string, resultSummary: string, workspaceFingerprint: string, recomputeFingerprint?: () => string): DungeonRun;
     waitForChange(actor: Actor, runId: string, afterSequence: number, timeoutMs?: number, signal?: AbortSignal): Promise<DungeonWaitResult>;
     sendPartyMessage(actor: Actor, runId: string, toSlot: PartySlot, input: PartyMessageInput): PartyMessage;
     getFingerprintIgnoreScopes(): string[];

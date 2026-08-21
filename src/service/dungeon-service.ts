@@ -930,6 +930,9 @@ export class DungeonService {
           readiness: 'unavailable',
           signalIds: [],
         })
+        // PRD §10.3: an unavailable validator freezes the run so DPS cannot
+        // keep claiming write leases while nobody can adjudicate them.
+        this.append(run, 'dungeon/dispatch-paused', { reason: 'healer-unavailable' })
       } else {
         this.markMemberDown(run.id, slot, reason)
       }
@@ -1169,8 +1172,22 @@ export class DungeonService {
 
   resumeDispatch(actor: Actor, runId: string): DungeonRun {
     const run = this.requireTank(actor, runId)
-    assert(run.controlState === 'recovering' || run.controlState === 'throttled', 'DISPATCH_NOT_PAUSED', 'Dispatch is not ready to resume')
+    assert(
+      run.controlState === 'recovering' || run.controlState === 'throttled' || run.controlState === 'paused',
+      'DISPATCH_NOT_PAUSED',
+      'Dispatch is not ready to resume',
+    )
     assert(run.slots.tank.readiness === 'recovering' || run.commanderLoad !== 'unavailable', 'COMMANDER_NOT_RECOVERED', 'Commander is not recovered')
+    if (run.controlState === 'paused') {
+      // A frozen run (PRD §10.3) only thaws once a healthy validator is back
+      // and the commander is alive; commander-caused recovering/throttled
+      // states keep their original resume semantics above.
+      assert(
+        run.slots.healer.readiness === 'healthy' && run.slots.tank.lifeState === 'alive',
+        'HEALER_NOT_RECOVERED',
+        'A paused run can only resume after the healer readiness is healthy and the tank is alive',
+      )
+    }
     const updated = this.append(run, 'dungeon/dispatch-resumed', { resumedAt: this.clock() }, actor.sessionId)
     return clone(updated)
   }
@@ -1639,7 +1656,13 @@ export class DungeonService {
     return clone(report)
   }
 
-  finishRun(actor: Actor, runId: string, resultSummary: string, workspaceFingerprint: string): DungeonRun {
+  finishRun(
+    actor: Actor,
+    runId: string,
+    resultSummary: string,
+    workspaceFingerprint: string,
+    recomputeFingerprint?: () => string,
+  ): DungeonRun {
     const run = this.requireTank(actor, runId)
     assert(run.phase === 'VALIDATING', 'INVALID_PHASE', 'Only a validating run can be completed')
     assert(run.controlState === 'normal', 'RUN_NOT_READY', 'Run control state must be normal')
@@ -1680,12 +1703,31 @@ export class DungeonService {
       'VALIDATION_REQUIRED',
       'Blocking findings remain',
     )
-    const updated = this.append(run, 'dungeon/run-completion-prepared', {
+    const prepared = this.append(run, 'dungeon/run-completion-prepared', {
       taskSetVersion: run.taskSetVersion,
       manifestVersion: manifest.manifestVersion,
       workspaceFingerprint,
     }, actor.sessionId)
-    const completed = this.append(updated, 'dungeon/run-completed', { resultSummary }, actor.sessionId)
+    // PRD §14.1 two-phase completion: after preparing, recompute the
+    // workspace fingerprint and only commit the terminal event when the
+    // workspace is unchanged; otherwise fail safely and keep the run
+    // validating against a now-stale acceptance report.
+    if (recomputeFingerprint) {
+      const actualFingerprint = recomputeFingerprint()
+      if (actualFingerprint !== workspaceFingerprint) {
+        this.append(prepared, 'dungeon/run-completion-aborted', {
+          expectedFingerprint: workspaceFingerprint,
+          actualFingerprint,
+          taskSetVersion: run.taskSetVersion,
+          manifestVersion: manifest.manifestVersion,
+        }, actor.sessionId)
+        throw new DungeonError(
+          'WORKSPACE_CHANGED_DURING_COMPLETION',
+          `Workspace changed during completion: expected fingerprint ${workspaceFingerprint} but recomputed ${actualFingerprint}`,
+        )
+      }
+    }
+    const completed = this.append(prepared, 'dungeon/run-completed', { resultSummary }, actor.sessionId)
     return clone(completed)
   }
 
@@ -2105,7 +2147,10 @@ export class DungeonService {
           : undefined
         if (ticket) ticket.status = 'completed'
         if (payload.refundCharge) run.commanderBattleResChargesRemaining += 1
-        run.controlState = 'normal'
+        // The commander's own state always recovers here, but a run frozen by
+        // an unavailable healer stays paused (PRD §10.3) until the healer is
+        // healthy again and dispatch is explicitly resumed.
+        run.controlState = run.slots.healer.readiness === 'unavailable' ? 'paused' : 'normal'
         run.commanderLoad = 'normal'
         run.slots.tank.lifeState = 'alive'
         run.slots.tank.readiness = 'healthy'
@@ -2158,8 +2203,16 @@ export class DungeonService {
         this.staleReports(run)
         break
       case 'dungeon/validation-submitted':
-        this.staleReports(run)
+        // PRD §9.3: submitting a report never invalidates prior reports by
+        // itself; only task-set, manifest, or fingerprint changes do.
         run.validationReports.push(payload.report)
+        break
+      case 'dungeon/run-completion-prepared':
+        break
+      case 'dungeon/run-completion-aborted':
+        // The workspace changed between validation and completion, so every
+        // existing acceptance report no longer describes the workspace.
+        this.staleReports(run)
         break
       case 'dungeon/run-completed':
         run.phase = 'COMPLETED'

@@ -1,5 +1,11 @@
 /** Event names persisted by this plugin. */
 export declare const DUNGEON_SESSION_EVENT_TYPES: readonly ["dungeon/event", "dungeon/projection"];
+/**
+ * Defensive vocabulary registration: existing types are skipped without
+ * mutating anything, and a frozen or otherwise read-only vocabulary never
+ * throws — the failure degrades to a single warning instead.
+ */
+export declare function addDungeonTypes(vocabulary: ReadonlySet<string>): void;
 /** Register against this package's module instance (direct/runtime mounts). */
 export declare function registerDungeonSessionEventTypes(): void;
 /**

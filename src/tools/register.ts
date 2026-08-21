@@ -28,9 +28,45 @@ function json<T>(value: T): JsonValue {
   return JSON.parse(JSON.stringify(value)) as JsonValue
 }
 
-function boundedText(value: string | undefined, limit = 500): string | undefined {
-  if (value === undefined || value.length <= limit) return value
+/**
+ * Bound free-form text for tool output. Non-string input (numbers, objects,
+ * arrays) is dropped instead of being implicitly stringified, so a corrupted
+ * or hostile value can never blow up the caller's context budget.
+ */
+export function boundedText(value: unknown, limit = 500): string | undefined {
+  if (typeof value !== 'string') return undefined
+  if (value.length <= limit) return value
   return `${value.slice(0, limit)}…`
+}
+
+/** Maximum number of evidence entries accepted from a single tool call. */
+const EVIDENCE_MAX_ITEMS = 20
+/** Maximum length of a single evidence entry accepted from a tool call. */
+const EVIDENCE_MAX_LENGTH = 500
+/** Maximum evidence entries surfaced per health signal in run summaries. */
+const SUMMARY_EVIDENCE_MAX_ITEMS = 3
+/** Maximum length of a single evidence entry in run summaries. */
+const SUMMARY_EVIDENCE_MAX_LENGTH = 200
+
+/**
+ * Validate and bound a model-supplied evidence list: element types are still
+ * strictly validated by stringList, then the count and per-entry length are
+ * capped so oversized arrays or entries cannot flood the audit log and any
+ * tool output that echoes them back.
+ */
+function boundedEvidenceList(value: unknown, field: string): string[] {
+  return stringList(value, field)
+    .slice(0, EVIDENCE_MAX_ITEMS)
+    .map((item) => boundedText(item, EVIDENCE_MAX_LENGTH))
+    .filter((item): item is string => item !== undefined)
+}
+
+/** Bound evidence entries surfaced in summaries, tolerating non-string entries. */
+function boundedSummaryEvidence(items: readonly unknown[]): string[] {
+  return items
+    .slice(0, SUMMARY_EVIDENCE_MAX_ITEMS)
+    .map((item) => boundedText(item, SUMMARY_EVIDENCE_MAX_LENGTH))
+    .filter((item): item is string => item !== undefined)
 }
 
 function summarizeRun(run: DungeonRun) {
@@ -70,6 +106,7 @@ function summarizeRun(run: DungeonRun) {
       kind: signal.kind,
       severity: signal.severity,
       observedAt: signal.observedAt,
+      evidence: boundedSummaryEvidence(signal.evidence),
     })),
     battleResChargesRemaining: run.battleResChargesRemaining,
     commanderBattleResChargesRemaining: run.commanderBattleResChargesRemaining,
@@ -190,14 +227,16 @@ function normalizeExecutionReport(
     slot,
     generation: run.slots[slot].generation,
     status: status as ExecutionReport['status'],
-    summary,
+    summary: boundedText(summary) ?? status,
     changedFiles: stringList(value.changedFiles, 'report.changedFiles'),
-    evidence: stringList(value.evidence, 'report.evidence'),
+    evidence: boundedEvidenceList(value.evidence, 'report.evidence'),
     commandsRun: commandsRun.map((entry) => {
       const command = entry as Record<string, unknown>
       return {
         command: String(command.command),
-        summary: typeof command.summary === 'string' ? command.summary : String(command.command),
+        summary: boundedText(
+          typeof command.summary === 'string' ? command.summary : String(command.command),
+        ) ?? '',
         ...(typeof command.exitCode === 'number' ? { exitCode: command.exitCode } : {}),
       }
     }),
@@ -212,10 +251,10 @@ function normalizePartyMessage(value: Record<string, unknown>): PartyMessageInpu
   if (!['progress', 'blocked', 'risk', 'question', 'decision', 'notice'].includes(kind)) {
     throw new DungeonError('INVALID_ARGS', 'message.kind is invalid')
   }
-  const evidence = stringList(value.evidence, 'message.evidence')
+  const evidence = boundedEvidenceList(value.evidence, 'message.evidence')
   const explicitSummary = typeof value.summary === 'string' ? value.summary.trim()
     : typeof value.text === 'string' ? value.text.trim() : ''
-  const summary = explicitSummary || evidence[0] || `${kind} update`
+  const summary = boundedText(explicitSummary || evidence[0] || `${kind} update`) ?? `${kind} update`
   return { kind: kind as PartyMessageInput['kind'], summary, evidence }
 }
 
@@ -696,7 +735,7 @@ export function registerDungeonTools(
           slot,
           completed: stringList(args.completed, 'completed'),
           nextSteps: stringList(args.nextSteps, 'nextSteps'),
-          evidenceDelta: stringList(args.evidenceDelta, 'evidenceDelta'),
+          evidenceDelta: boundedEvidenceList(args.evidenceDelta, 'evidenceDelta'),
           blockers: stringList(args.blockers, 'blockers'),
           workspaceFingerprint: run.workspaceFingerprint,
         }
@@ -815,16 +854,16 @@ export function registerDungeonTools(
           checks: (args.checks as Array<Record<string, unknown>>).map((check) => ({
             criterionId: String(check.criterionId),
             status: check.status as 'pass' | 'fail' | 'blocked' | 'not-applicable',
-            evidence: stringList(check.evidence, 'checks[].evidence'),
+            evidence: boundedEvidenceList(check.evidence, 'checks[].evidence'),
             ...(typeof check.notApplicableReason === 'string' ? { notApplicableReason: check.notApplicableReason } : {}),
           })),
           findings: (args.findings as Array<Record<string, unknown>>).map((finding) => ({
             id: String(finding.id),
             severity: finding.severity as 'critical' | 'major' | 'minor',
             ...(typeof finding.ownerTaskId === 'string' ? { ownerTaskId: finding.ownerTaskId } : {}),
-            title: String(finding.title),
-            evidence: String(finding.evidence),
-            remediation: String(finding.remediation),
+            title: boundedText(String(finding.title)) ?? '',
+            evidence: boundedText(String(finding.evidence)) ?? '',
+            remediation: boundedText(String(finding.remediation)) ?? '',
           })),
           summary: args.summary,
         }
@@ -901,7 +940,17 @@ export function registerDungeonTools(
         const caller = actor(exec)
         const current = service.getRunForActor(caller, args.runId)
         const fingerprint = computeWorkspaceFingerprint(current.workspaceRoot, service.getFingerprintIgnoreScopes())
-        const run = service.finishRun(caller, args.runId, args.resultSummary, fingerprint)
+        // Two-phase completion (PRD §14.1): the service re-derives the
+        // workspace fingerprint between run-completion-prepared and
+        // run-completed, so an external change during that window aborts the
+        // completion instead of certifying a stale workspace.
+        const run = service.finishRun(
+          caller,
+          args.runId,
+          args.resultSummary,
+          fingerprint,
+          () => computeWorkspaceFingerprint(current.workspaceRoot, service.getFingerprintIgnoreScopes()),
+        )
         await agentManager?.disposeRun(args.runId)
         return json(summarizeRun(run))
       },

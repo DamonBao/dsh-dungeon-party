@@ -35,7 +35,8 @@
     "build:client:types": "tsdown --no-config client/index.tsx --format esm --platform browser --dts --out-dir lib/client --external react --external react/jsx-runtime --external @deepseek-ai/dsh-client-runtime --external @deepseek-ai/dsh-client-ui-layout --external @deepseek-ai/dsh-client-ui-slots --external node:fs --external node:path",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

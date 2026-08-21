@@ -1,8 +1,14 @@
 import { renderToStaticMarkup } from 'react-dom/server'
-import { act, create } from 'react-test-renderer'
+import { act, create, type ReactTestRenderer, type ReactTestRendererJSON } from 'react-test-renderer'
 import { describe, expect, it, vi } from 'vitest'
 
-import { DungeonPartyOverlay, inject, memberMeters } from '../client/index.js'
+import {
+  DungeonPartyOverlay,
+  inject,
+  memberMeters,
+  validationCheckCounts,
+  validationFindingGroups,
+} from '../client/index.js'
 import { DungeonService } from '../src/service/dungeon-service.js'
 import { MemoryDungeonEventStore } from '../src/service/memory-event-store.js'
 
@@ -17,6 +23,100 @@ function runProjection() {
     runId: 'run-1', objective: 'Build safely', workspaceRoot: '/workspace',
     workspaceFingerprint: 'v1', tankSessionId: 'tank',
   })
+}
+
+function validationProjection() {
+  const run = runProjection()
+  run.phase = 'VALIDATING'
+  run.taskSetVersion = 3
+  run.tasks['client-panels'] = { workOrder: { id: 'client-panels', title: '客户端面板' } } as never
+  run.validationReports.push(
+    {
+      runId: 'run-1', validationId: 'val-1', verdict: 'pass', status: 'stale',
+      taskSetVersion: 2, manifestVersion: 1, workspaceFingerprint: 'fp-v1',
+      checks: [{ criterionId: 'c1', status: 'pass', evidence: ['e1'] }],
+      findings: [], summary: '首轮验收通过', createdAt: '2025-01-01T00:10:00.000Z',
+    },
+    {
+      runId: 'run-1', validationId: 'val-2', verdict: 'fail', status: 'stale',
+      taskSetVersion: 3, manifestVersion: 2, workspaceFingerprint: 'fp-v2',
+      checks: [
+        { criterionId: 'c1', status: 'pass', evidence: ['e1'] },
+        { criterionId: 'c2', status: 'pass', evidence: ['e2'] },
+        { criterionId: 'c3', status: 'fail', evidence: ['e3'] },
+        { criterionId: 'c4', status: 'blocked', evidence: [] },
+        { criterionId: 'c5', status: 'not-applicable', evidence: [], notApplicableReason: '范围外' },
+        { criterionId: 'c6', status: 'not-applicable', evidence: [] },
+      ],
+      findings: [
+        { id: 'f1', severity: 'critical', ownerTaskId: 'client-panels', title: '验收空态未被测试覆盖', evidence: 'coverage', remediation: '补用例' },
+        { id: 'f2', severity: 'major', ownerTaskId: 'client-styles', title: '战复徽标在窄面板溢出', evidence: 'layout', remediation: '收紧间距' },
+        { id: 'f3', severity: 'major', ownerTaskId: 'client-styles', title: '代数字号过小', evidence: 'a11y', remediation: '提升字号' },
+        { id: 'f4', severity: 'minor', title: '时间戳未本地化', evidence: 'i18n', remediation: '格式化' },
+      ],
+      summary: '验收发现 4 项缺陷，其中 1 项致命', createdAt: '2025-01-01T00:20:00.000Z',
+    },
+  )
+  run.battleResChargesRemaining = 1
+  run.commanderBattleResChargesRemaining = 0
+  run.resurrectionRequests.push(
+    {
+      resurrectionId: 'res-done', runId: 'run-1', targetSlot: 'dps-1', targetSessionId: 'dps-1-old',
+      status: 'completed', requestedAt: '2025-01-01T00:05:00.000Z', expiresAt: '2025-01-01T00:10:00.000Z',
+    },
+    {
+      resurrectionId: 'res-open', runId: 'run-1', targetSlot: 'dps-2', targetSessionId: 'dps-2',
+      status: 'issued', requestedAt: '2025-01-01T00:21:00.000Z', expiresAt: '2025-01-01T00:26:00.000Z',
+    },
+  )
+  run.commanderRescueTickets.push({
+    ticketId: 'ticket-open', runId: 'run-1', targetSlot: 'tank', targetSessionId: 'tank',
+    healerSessionId: 'healer', commanderCheckpointId: 'cp-9', status: 'consumed',
+    issuedAt: '2025-01-01T00:22:00.000Z', expiresAt: '2025-01-01T00:27:00.000Z',
+    recoveryExpiresAt: '2025-01-01T00:32:00.000Z', version: 1,
+  })
+  run.slots['dps-1'].generation = 2
+  run.slots['dps-1'].history.push({
+    sessionId: 'dps-1-old', generation: 1, boundAt: '2025-01-01T00:01:00.000Z',
+    unboundAt: '2025-01-01T00:04:00.000Z', endReason: 'replaced',
+  })
+  return run
+}
+
+function overlayUseSessions(run: unknown) {
+  return ((selector: (state: never) => unknown) => selector({
+    ids: ['tank'],
+    byId: {
+      tank: {
+        id: 'tank', displayTitle: 'Tank', running: true, blank: false, updatedAt: 0,
+        projectionValues: { 'dungeon-party': run },
+      },
+    },
+    current: 'tank', phase: 'ready', subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined,
+  } as never)) as never
+}
+
+function renderOverlay(run: unknown): ReactTestRenderer {
+  return create(<DungeonPartyOverlay
+    requestAction={async () => true}
+    useSessions={overlayUseSessions(run)}
+    useWorkspaces={(() => undefined) as never}
+  />)
+}
+
+function switchTab(renderer: ReactTestRenderer, label: string) {
+  act(() => renderer.root.findAllByType('button').find((button) => button.children.includes(label))!.props.onClick())
+}
+
+function textOf(node: ReactTestRendererJSON | ReactTestRendererJSON[] | null): string {
+  if (node === null || node === undefined) return ''
+  if (Array.isArray(node)) return node.map((item) => textOf(item)).filter((part) => part !== '').join(' ')
+  const parts: string[] = []
+  for (const child of node.children ?? []) {
+    if (typeof child === 'string' || typeof child === 'number') parts.push(String(child))
+    else parts.push(textOf(child))
+  }
+  return parts.join('')
 }
 
 describe('DungeonPartyOverlay', () => {
@@ -138,5 +238,93 @@ describe('DungeonPartyOverlay', () => {
 
     await act(async () => renderer.root.findAllByType('button').find((button) => button.children.includes('确认提交'))!.props.onClick())
     expect(requestAction).toHaveBeenCalledOnce()
+  })
+
+  it('tallies malformed validation payloads defensively', () => {
+    expect(validationCheckCounts(null)).toEqual({ pass: 0, fail: 0, blocked: 0, 'not-applicable': 0 })
+    expect(validationCheckCounts({ checks: [{ status: 'pass' }, { status: 'weird' }, null] as never }))
+      .toEqual({ pass: 1, fail: 0, blocked: 0, 'not-applicable': 0 })
+    expect(validationFindingGroups(undefined)).toEqual([])
+    const groups = validationFindingGroups([{ severity: 'critical' }, { severity: 'cosmic' }, null] as never)
+    expect(groups.map((group) => [group.severity, group.label, group.findings.length])).toEqual([
+      ['critical', '致命缺陷', 1],
+      ['other', '其他发现', 1],
+    ])
+  })
+
+  it('surfaces the latest validation report and battle resurrection status', () => {
+    const renderer = renderOverlay(validationProjection())
+    const validationTab = renderer.root.findByProps({ 'aria-label': '验收与战复面板' })
+    expect(validationTab.props['data-active']).toBe(false)
+    switchTab(renderer, '验收')
+    expect(renderer.root.findByProps({ 'aria-label': '验收与战复面板' }).props['data-active']).toBe(true)
+    const text = textOf(renderer.toJSON())
+
+    // FR-062: latest report verdict, stale stamp, versions, check counts, severity groups
+    expect(renderer.root.findByProps({ 'data-verdict': 'fail' })).toBeTruthy()
+    expect(text).toContain('已失效')
+    expect(text).toContain('任务集 v3 · 清单 v2')
+    expect(text).toContain('验收发现 4 项缺陷，其中 1 项致命')
+    expect(text).toContain('通过 2')
+    expect(text).toContain('失败 1')
+    expect(text).toContain('受阻 1')
+    expect(text).toContain('不适用 2')
+    expect(text).toContain('致命缺陷 · 1')
+    expect(text).toContain('主要缺陷 · 2')
+    expect(text).toContain('次要缺陷 · 1')
+    expect(text).toContain('验收空态未被测试覆盖')
+    expect(text).toContain('归属 客户端面板')
+    expect(text).toContain('归属 client-styles')
+    expect(text).toContain('归属 未归属任务')
+    expect(text).not.toContain('首轮验收通过')
+    expect(text).not.toContain('val-1')
+
+    // FR-063: charges, in-flight requests and tickets, slot generations
+    expect(renderer.root.findByProps({ 'aria-label': 'DPS 战复剩余 1' })).toBeTruthy()
+    expect(renderer.root.findByProps({ 'aria-label': '领队战复剩余 0' })).toBeTruthy()
+    expect(text).toContain('影行者 · Nyx')
+    expect(text).toContain('res-open')
+    expect(text).toContain('已签发')
+    expect(text).toContain('复活进行中')
+    expect(text).toContain('ticket-open')
+    expect(text).not.toContain('res-done')
+    expect(text).toContain('G2')
+    expect(text).toContain('历史 1')
+  })
+
+  it('falls back to graceful empty states without validation or resurrection data', () => {
+    const renderer = renderOverlay(runProjection())
+    switchTab(renderer, '验收')
+    const text = textOf(renderer.toJSON())
+    expect(text).toContain('奶尚未提交验收报告')
+    expect(text).toContain('0 REPORTS')
+    expect(text).toContain('暂无进行中的复活申请')
+    expect(text).toContain('暂无进行中的紧急票据')
+    expect(renderer.root.findByProps({ 'aria-label': 'DPS 战复剩余 1' })).toBeTruthy()
+    expect(renderer.root.findByProps({ 'aria-label': '领队战复剩余 1' })).toBeTruthy()
+    expect(text).toContain('G1')
+    expect(text).toContain('历史 0')
+  })
+
+  it('keeps rendering when the projection carries malformed validation data', () => {
+    const run = runProjection()
+    run.validationReports = [{ status: 'stale' }] as never
+    run.resurrectionRequests = [{ status: 'issued' }] as never
+    run.commanderRescueTickets = [{ status: 'consumed' }] as never
+    run.battleResChargesRemaining = undefined as never
+    run.commanderBattleResChargesRemaining = 'n/a' as never
+    const renderer = renderOverlay(run)
+    switchTab(renderer, '验收')
+    const text = textOf(renderer.toJSON())
+    expect(renderer.root.findByProps({ role: 'dialog' })).toBeTruthy()
+    expect(text).toContain('未知结论')
+    expect(text).toContain('已失效')
+    expect(text).toContain('通过 0')
+    expect(text).toContain('本轮检定未发现缺陷')
+    expect(renderer.root.findByProps({ 'aria-label': 'DPS 战复剩余 0' })).toBeTruthy()
+    expect(renderer.root.findByProps({ 'aria-label': '领队战复剩余 0' })).toBeTruthy()
+    expect(text).toContain('未知槽位')
+    expect(text).toContain('已签发')
+    expect(text).toContain('复活进行中')
   })
 })

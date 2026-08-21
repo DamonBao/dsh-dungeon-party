@@ -5,6 +5,8 @@ import {
   DungeonService,
   type DungeonConfig,
   type DungeonEvent,
+  type ValidationManifest,
+  type ValidationSubmission,
   type WorkOrder,
 } from '../src/service/dungeon-service.js'
 
@@ -70,6 +72,48 @@ function createReadyRun(service: DungeonService) {
   service.createTask(tank, run.id, task())
   service.changePhase(tank, run.id, 'EXECUTING')
   return run
+}
+
+function validatingRun(service: DungeonService): ValidationManifest {
+  const run = createReadyRun(service)
+  service.assignTask(tank, run.id, 'task-1', 'dps-1')
+  const lease = service.claimTask(dps1, run.id, 'task-1')
+  service.submitExecution(dps1, run.id, {
+    taskId: 'task-1',
+    taskVersion: 1,
+    leaseId: lease.leaseId,
+    leaseVersion: lease.version,
+    slot: 'dps-1',
+    generation: 1,
+    status: 'completed',
+    summary: 'Done',
+    changedFiles: ['src/service/dungeon-service.ts'],
+    evidence: ['unit tests passed'],
+    commandsRun: [],
+    risks: [],
+    remainingWork: [],
+  })
+  service.changePhase(tank, run.id, 'VALIDATING')
+  return service.createValidationManifest(tank, run.id, 'fingerprint-v1')
+}
+
+function passSubmission(manifest: ValidationManifest, validationId: string): ValidationSubmission {
+  return {
+    validationId,
+    verdict: 'pass',
+    taskSetVersion: manifest.taskSetVersion,
+    manifestVersion: manifest.manifestVersion,
+    workspaceFingerprint: manifest.workspaceFingerprint,
+    checks: [
+      {
+        criterionId: 'task-1:works',
+        status: 'pass',
+        evidence: ['unit tests passed'],
+      },
+    ],
+    findings: [],
+    summary: 'All required checks passed',
+  }
 }
 
 describe('DungeonService', () => {
@@ -472,6 +516,120 @@ describe('DungeonService', () => {
         summary: 'Pass despite issue',
       }),
     ).toThrowError(expect.objectContaining({ code: 'PASS_HAS_BLOCKING_FINDINGS' }))
+  })
+
+  it('completes a run in two phases when the recomputed workspace fingerprint matches', () => {
+    const { service, persisted } = setup()
+    const manifest = validatingRun(service)
+    service.submitValidation(healer, 'run-1', passSubmission(manifest, 'validation-1'))
+
+    let recomputations = 0
+    const completed = service.finishRun(tank, 'run-1', 'Implemented and tested', 'fingerprint-v1', () => {
+      recomputations += 1
+      return 'fingerprint-v1'
+    })
+
+    expect(recomputations).toBe(1)
+    expect(completed.phase).toBe('COMPLETED')
+    expect(persisted.map((event) => event.type).slice(-2)).toEqual([
+      'dungeon/run-completion-prepared',
+      'dungeon/run-completed',
+    ])
+    expect(persisted.some((event) => event.type === 'dungeon/run-completion-aborted')).toBe(false)
+  })
+
+  it('aborts completion, stales reports, and stays validating when the workspace changed', () => {
+    const { service, persisted } = setup()
+    const manifest = validatingRun(service)
+    service.submitValidation(healer, 'run-1', passSubmission(manifest, 'validation-1'))
+
+    let error: DungeonError | undefined
+    try {
+      service.finishRun(tank, 'run-1', 'Implemented and tested', 'fingerprint-v1', () => 'fingerprint-v2')
+    } catch (caught) {
+      error = caught as DungeonError
+    }
+
+    expect(error).toMatchObject({ name: 'DungeonError', code: 'WORKSPACE_CHANGED_DURING_COMPLETION' })
+    expect(error?.message).toContain('fingerprint-v1')
+    expect(error?.message).toContain('fingerprint-v2')
+
+    const abortedEvent = persisted.find((event) => event.type === 'dungeon/run-completion-aborted')
+    expect(abortedEvent?.payload).toMatchObject({
+      expectedFingerprint: 'fingerprint-v1',
+      actualFingerprint: 'fingerprint-v2',
+      taskSetVersion: manifest.taskSetVersion,
+      manifestVersion: manifest.manifestVersion,
+    })
+    expect(persisted.map((event) => event.type).slice(-2)).toEqual([
+      'dungeon/run-completion-prepared',
+      'dungeon/run-completion-aborted',
+    ])
+    expect(persisted.some((event) => event.type === 'dungeon/run-completed')).toBe(false)
+
+    const after = service.getRun('run-1')
+    expect(after.phase).toBe('VALIDATING')
+    expect(after.validationReports.at(-1)?.status).toBe('stale')
+
+    // The stale report can no longer complete the run even against a stable workspace.
+    expect(() =>
+      service.finishRun(tank, 'run-1', 'Implemented and tested', 'fingerprint-v1', () => 'fingerprint-v1'),
+    ).toThrowError(expect.objectContaining({ code: 'VALIDATION_REQUIRED' }))
+
+    // A fresh manifest and pass report for the changed workspace complete the run.
+    const nextManifest = service.createValidationManifest(tank, 'run-1', 'fingerprint-v2')
+    expect(nextManifest).toMatchObject({ manifestVersion: 2, workspaceFingerprint: 'fingerprint-v2' })
+    service.submitValidation(healer, 'run-1', passSubmission(nextManifest, 'validation-2'))
+    const completed = service.finishRun(tank, 'run-1', 'Implemented and tested', 'fingerprint-v2', () => 'fingerprint-v2')
+    expect(completed.phase).toBe('COMPLETED')
+  })
+
+  it('keeps earlier reports current when new reports are submitted against the same manifest', () => {
+    const { service } = setup()
+    const manifest = validatingRun(service)
+    service.submitValidation(healer, 'run-1', passSubmission(manifest, 'validation-1'))
+
+    service.submitValidation(healer, 'run-1', {
+      validationId: 'validation-2',
+      verdict: 'fail',
+      taskSetVersion: manifest.taskSetVersion,
+      manifestVersion: manifest.manifestVersion,
+      workspaceFingerprint: manifest.workspaceFingerprint,
+      checks: [
+        { criterionId: 'task-1:works', status: 'fail', evidence: ['regression found'] },
+      ],
+      findings: [
+        {
+          id: 'finding-1',
+          severity: 'major',
+          ownerTaskId: 'task-1',
+          title: 'Regression',
+          evidence: 'reproduction',
+          remediation: 'fix it',
+        },
+      ],
+      summary: 'A later re-check found a defect',
+    })
+
+    let run = service.getRun('run-1')
+    expect(run.validationReports.map((report) => [report.validationId, report.status])).toEqual([
+      ['validation-1', 'current'],
+      ['validation-2', 'current'],
+    ])
+
+    // Fingerprint and manifest changes still invalidate prior reports.
+    service.observeWorkspaceFingerprint('run-1', 'fingerprint-v2')
+    run = service.getRun('run-1')
+    expect(run.validationReports.every((report) => report.status === 'stale')).toBe(true)
+
+    const nextManifest = service.createValidationManifest(tank, 'run-1', 'fingerprint-v2')
+    service.submitValidation(healer, 'run-1', passSubmission(nextManifest, 'validation-3'))
+    run = service.getRun('run-1')
+    expect(run.validationReports.map((report) => [report.validationId, report.status])).toEqual([
+      ['validation-1', 'stale'],
+      ['validation-2', 'stale'],
+      ['validation-3', 'current'],
+    ])
   })
 })
 

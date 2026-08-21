@@ -265,6 +265,7 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     'dungeon-party': DungeonRun | null;
   }
 }
+type ValidationCheckStatus = 'pass' | 'fail' | 'blocked' | 'not-applicable';
 interface MemberMeters {
   health: number;
   resource: number;
@@ -273,6 +274,15 @@ interface MemberMeters {
 }
 /** Convert durable service state into role-specific, human-readable meters. */
 declare function memberMeters(run: DungeonRun, slot: PartySlot): MemberMeters;
+interface ValidationFindingGroup {
+  severity: string;
+  label: string;
+  findings: ValidationFinding[];
+}
+/** Tally per-status check counts of a validation report, tolerating malformed projections. */
+declare function validationCheckCounts(report: Pick<ValidationReport, 'checks'> | null | undefined): Record<ValidationCheckStatus, number>;
+/** Group findings by severity (critical → major → minor, unknown severities last). */
+declare function validationFindingGroups(findings: ValidationReport['findings'] | null | undefined): ValidationFindingGroup[];
 interface DungeonPartyOverlayProps extends PropsRuntime<'shell.overlay'> {
   requestAction: (instruction: string) => Promise<boolean>;
 }
@@ -283,4 +293,4 @@ declare function DungeonPartyOverlay({
 declare const inject: string[];
 declare function apply(ctx: ClientContext): void;
 //#endregion
-export { DungeonPartyOverlay, MemberMeters, apply, inject, memberMeters };
+export { DungeonPartyOverlay, MemberMeters, ValidationFindingGroup, apply, inject, memberMeters, validationCheckCounts, validationFindingGroups };

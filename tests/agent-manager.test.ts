@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi, type Mock } from 'vitest'
 
 import { PartyAgentManager } from '../src/adapters/party-agent-manager.js'
 import { DungeonService, type DungeonEvent, type WorkOrder } from '../src/service/dungeon-service.js'
@@ -545,5 +545,252 @@ describe('PartyAgentManager', () => {
       'next-turn',
       true,
     )
+  })
+})
+
+describe('PartyAgentManager drain notification', () => {
+  function workOrderFor(id: string, overrides: Partial<WorkOrder> = {}): WorkOrder {
+    return {
+      id,
+      runId: 'run',
+      title: `Task ${id}`,
+      objective: `Execute ${id}`,
+      inputs: [],
+      constraints: [],
+      acceptanceCriteria: [{ id: `${id}:done`, description: 'Done', required: true }],
+      readScopes: ['src/**'],
+      writeScopes: [`src/${id}/**`],
+      blockedBy: [],
+      expectedArtifacts: [],
+      priority: 'normal',
+      required: true,
+      version: 1,
+      ...overrides,
+    }
+  }
+
+  function reportFor(
+    taskId: string,
+    lease: { leaseId: string; version: number },
+    status: 'completed' | 'blocked' | 'failed' = 'completed',
+  ) {
+    return {
+      taskId,
+      taskVersion: 1,
+      leaseId: lease.leaseId,
+      leaseVersion: lease.version,
+      slot: 'dps-1' as const,
+      generation: 1,
+      status,
+      summary: `reported ${status}`,
+      changedFiles: [],
+      evidence: ['evidence'],
+      commandsRun: [],
+      risks: [],
+      remainingWork: [],
+    }
+  }
+
+  function bindParty(service: DungeonService) {
+    const tank = { sessionId: 'tank' }
+    service.bindMember(tank, 'run', 'healer', 'healer-session')
+    service.bindMember(tank, 'run', 'dps-1', 'dps-1-session')
+    service.changePhase(tank, 'run', 'PLANNING')
+    return tank
+  }
+
+  function submitTask(
+    service: DungeonService,
+    tank: { sessionId: string },
+    taskId: string,
+    status: 'completed' | 'blocked' | 'failed' = 'completed',
+  ) {
+    service.assignTask(tank, 'run', taskId, 'dps-1')
+    const lease = service.claimTask({ sessionId: 'dps-1-session' }, 'run', taskId)
+    service.submitExecution({ sessionId: 'dps-1-session' }, 'run', reportFor(taskId, lease, status))
+  }
+
+  const drainNotices = (tankSend: Mock): string[] =>
+    tankSend.mock.calls
+      .map((call) => String(call[0]?.content?.[0]?.text ?? ''))
+      .filter((text) => text.includes('drained'))
+
+  it('notifies the tank to open VALIDATING once execution drains', async () => {
+    const { service, manager, tankSend } = setup()
+    const tank = bindParty(service)
+    service.createTask(tank, 'run', workOrderFor('task-1'))
+    service.changePhase(tank, 'run', 'EXECUTING')
+    submitTask(service, tank, 'task-1')
+
+    await manager.kickScheduler('run')
+
+    const notices = drainNotices(tankSend)
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toContain('Run run ')
+    expect(notices[0]).toContain('party_health')
+    expect(notices[0]).toContain('party_phase VALIDATING')
+    expect(tankSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: expect.objectContaining({ kind: 'plugin', plugin: 'dsh-dungeon-party', form: 'relay' }),
+        content: [expect.objectContaining({ text: expect.stringContaining('VALIDATING') })],
+      }),
+      'next-step',
+      true,
+    )
+    // The notice only suggests the transition; T still owns the state change.
+    expect(service.getRun('run').phase).toBe('EXECUTING')
+  })
+
+  it('deduplicates drain notices per taskSetVersion and re-fires once after the task set changes', async () => {
+    const { service, manager, tankSend } = setup()
+    const tank = bindParty(service)
+    service.createTask(tank, 'run', workOrderFor('task-1'))
+    service.changePhase(tank, 'run', 'EXECUTING')
+    submitTask(service, tank, 'task-1')
+
+    await manager.kickScheduler('run')
+    expect(drainNotices(tankSend)).toHaveLength(1)
+
+    // Repeated kicks under the same task set stay quiet.
+    await manager.kickScheduler('run')
+    await manager.kickScheduler('run')
+    expect(drainNotices(tankSend)).toHaveLength(1)
+
+    // The task set changes: a repair round adds a follow-up work order.
+    service.changePhase(tank, 'run', 'REPAIR')
+    service.createTask(tank, 'run', workOrderFor('task-2'))
+    submitTask(service, tank, 'task-2')
+
+    await manager.kickScheduler('run')
+    const notices = drainNotices(tankSend)
+    expect(notices).toHaveLength(2)
+    expect(notices[1]).toContain('party_health')
+    expect(notices[1]).toContain('party_phase VALIDATING')
+    // REPAIR drain guidance asks T to judge re-acceptance, not to finish.
+    expect(notices[1]).toContain('re-acceptance')
+    expect(notices[1]).toContain('not completion')
+
+    // The new task set is deduplicated as well.
+    await manager.kickScheduler('run')
+    expect(drainNotices(tankSend)).toHaveLength(2)
+  })
+
+  it('stays silent while a task is still running', async () => {
+    const { service, manager, tankSend } = setup()
+    const tank = bindParty(service)
+    service.createTask(tank, 'run', workOrderFor('task-1'))
+    service.changePhase(tank, 'run', 'EXECUTING')
+    service.assignTask(tank, 'run', 'task-1', 'dps-1')
+    service.claimTask({ sessionId: 'dps-1-session' }, 'run', 'task-1')
+
+    await manager.kickScheduler('run')
+
+    expect(service.getRun('run').tasks['task-1']!.status).toBe('running')
+    expect(drainNotices(tankSend)).toHaveLength(0)
+  })
+
+  it('stays silent while a ready task still waits on unmet dependencies', async () => {
+    const { service, manager, tankSend } = setup()
+    const tank = bindParty(service)
+    service.createTask(tank, 'run', workOrderFor('core'))
+    service.createTask(tank, 'run', workOrderFor('dep', { required: false }))
+    service.createTask(tank, 'run', workOrderFor('child', { required: false, blockedBy: ['dep'] }))
+    service.changePhase(tank, 'run', 'EXECUTING')
+    submitTask(service, tank, 'core')
+    submitTask(service, tank, 'dep', 'blocked')
+
+    await manager.kickScheduler('run')
+
+    // 'child' cannot be dispatched because 'dep' never completed, so the
+    // schedulable pool is not empty and no drain notice may fire.
+    expect(service.getRun('run').tasks.child!.status).toBe('pending')
+    expect(drainNotices(tankSend)).toHaveLength(0)
+  })
+
+  it('stays silent while battle resurrection or validator maintenance is in flight', async () => {
+    const { service, manager, tankSend } = setup()
+    const tank = bindParty(service)
+    service.createTask(tank, 'run', workOrderFor('task-1'))
+    service.changePhase(tank, 'run', 'EXECUTING')
+    submitTask(service, tank, 'task-1')
+    service.markMemberDown('run', 'dps-1', 'runtime failure')
+    service.requestBattleRes(tank, 'run', 'dps-1', 'res-1')
+
+    await manager.kickScheduler('run')
+    expect(drainNotices(tankSend)).toHaveLength(0)
+
+    // A fresh run with an issued commander rescue ticket instead.
+    const rescued = setup()
+    const rescuedTank = bindParty(rescued.service)
+    rescued.service.createTask(rescuedTank, 'run', workOrderFor('task-1'))
+    rescued.service.changePhase(rescuedTank, 'run', 'EXECUTING')
+    submitTask(rescued.service, rescuedTank, 'task-1')
+    rescued.service.markCommanderUnavailable('run', 'tank offline')
+
+    await rescued.manager.kickScheduler('run')
+    expect(drainNotices(rescued.tankSend)).toHaveLength(0)
+
+    // A fresh run with an issued validator maintenance instruction instead.
+    const second = setup()
+    const secondTank = bindParty(second.service)
+    second.service.createTask(secondTank, 'run', workOrderFor('task-1'))
+    second.service.changePhase(secondTank, 'run', 'EXECUTING')
+    submitTask(second.service, secondTank, 'task-1')
+    for (const kind of ['tool-failure', 'queue-pressure'] as const) {
+      second.service.observeHealthSignal('run', {
+        slot: 'healer', source: 'runtime', kind, severity: 'warning', windowMs: 60_000, evidence: [kind],
+      })
+    }
+    second.service.directValidatorMaintenance(secondTank, 'run')
+
+    await second.manager.kickScheduler('run')
+
+    expect(drainNotices(second.tankSend)).toHaveLength(0)
+  })
+
+  it('stays silent when a required task was reported blocked or failed', async () => {
+    const { service, manager, tankSend } = setup()
+    const tank = bindParty(service)
+    service.createTask(tank, 'run', workOrderFor('must'))
+    service.createTask(tank, 'run', workOrderFor('maybe', { required: false }))
+    service.changePhase(tank, 'run', 'EXECUTING')
+    submitTask(service, tank, 'maybe')
+    submitTask(service, tank, 'must', 'failed')
+
+    await manager.kickScheduler('run')
+
+    // No pending/ready/running task and no lease remain, but a required task
+    // is not completed, so VALIDATING would be rejected and no notice fires.
+    expect(service.getRun('run').tasks.must!.status).toBe('failed')
+    expect(drainNotices(tankSend)).toHaveLength(0)
+  })
+
+  it('stays silent for an executing run whose task set is still empty', async () => {
+    const { service, manager, tankSend } = setup()
+    const tank = bindParty(service)
+    service.changePhase(tank, 'run', 'EXECUTING')
+
+    await manager.kickScheduler('run')
+
+    expect(drainNotices(tankSend)).toHaveLength(0)
+  })
+
+  it('lets optional unfinished tasks pass the drain gate', async () => {
+    const { service, manager, tankSend } = setup()
+    const tank = bindParty(service)
+    service.createTask(tank, 'run', workOrderFor('core'))
+    service.createTask(tank, 'run', workOrderFor('stretch', { required: false }))
+    service.createTask(tank, 'run', workOrderFor('spike', { required: false }))
+    service.changePhase(tank, 'run', 'EXECUTING')
+    submitTask(service, tank, 'core')
+    submitTask(service, tank, 'stretch', 'blocked')
+    submitTask(service, tank, 'spike', 'failed')
+
+    await manager.kickScheduler('run')
+
+    expect(service.getRun('run').tasks.stretch!.status).toBe('blocked')
+    expect(service.getRun('run').tasks.spike!.status).toBe('failed')
+    expect(drainNotices(tankSend)).toHaveLength(1)
+    expect(drainNotices(tankSend)[0]).toContain('party_phase VALIDATING')
   })
 })

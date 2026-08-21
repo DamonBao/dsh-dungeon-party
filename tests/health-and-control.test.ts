@@ -47,7 +47,7 @@ function workOrder(): WorkOrder {
   }
 }
 
-function executingParty(service: DungeonService) {
+function assignedParty(service: DungeonService) {
   service.startRun({
     runId: 'run',
     objective: 'Build',
@@ -61,6 +61,10 @@ function executingParty(service: DungeonService) {
   service.createTask(tank, 'run', workOrder())
   service.changePhase(tank, 'run', 'EXECUTING')
   service.assignTask(tank, 'run', 'task', 'dps-1')
+}
+
+function executingParty(service: DungeonService) {
+  assignedParty(service)
   return service.claimTask(dps, 'run', 'task')
 }
 
@@ -250,5 +254,84 @@ describe('commander backpressure', () => {
     expect(run.controlState).toBe('throttled')
     expect(run.commanderCheckpoint).toMatchObject({ pendingDecisionIds: ['decision-1', 'decision-2'] })
     expect(events.map((event) => event.type)).toContain('dungeon/commander-checkpointed')
+  })
+
+  it('resumes throttled dispatch back to normal', () => {
+    const { service } = harness({ commanderMaxPendingDecisions: 2, commanderDecisionSlaMs: 10_000 })
+    executingParty(service)
+    service.observeCommanderLoad('run', {
+      pendingDecisionIds: ['decision-1', 'decision-2'],
+      oldestDecisionAgeMs: 10_001,
+    })
+    expect(service.getRun('run').controlState).toBe('throttled')
+
+    const resumed = service.resumeDispatch(tank, 'run')
+    expect(resumed).toMatchObject({ controlState: 'normal', commanderLoad: 'normal' })
+  })
+})
+
+describe('healer failure freeze', () => {
+  it('marks the healer unavailable, pauses dispatch, and blocks new write leases', () => {
+    const { service, events } = harness()
+    assignedParty(service)
+
+    service.observeAgentDisposed(healer.sessionId, 'agent disposed')
+
+    const run = service.getRun('run')
+    expect(run.slots.healer.readiness).toBe('unavailable')
+    expect(run.controlState).toBe('paused')
+    const pauseEvent = events.find((event) => event.type === 'dungeon/dispatch-paused')
+    expect(pauseEvent?.payload).toEqual({ reason: 'healer-unavailable' })
+    expect(() => service.claimTask(dps, 'run', 'task')).toThrowError(
+      expect.objectContaining({ code: 'DISPATCH_BLOCKED' }),
+    )
+  })
+
+  it('resumes a healer-caused pause only after the healer recovers and the tank is alive', () => {
+    const { service } = harness()
+    assignedParty(service)
+    service.observeAgentDisposed(healer.sessionId, 'agent disposed')
+
+    expect(() => service.resumeDispatch(tank, 'run')).toThrowError(
+      expect.objectContaining({ code: 'HEALER_NOT_RECOVERED' }),
+    )
+
+    // The relaunched healer session first reports only warning-level signals,
+    // which degrades its readiness, then completes tank-directed maintenance.
+    for (const kind of ['tool-failure', 'queue-pressure'] as const) {
+      service.observeHealthSignal('run', {
+        slot: 'healer',
+        source: 'runtime',
+        kind,
+        severity: 'warning',
+        windowMs: 120_000,
+        evidence: [kind],
+      })
+    }
+    expect(service.getRun('run').slots.healer.readiness).toBe('degraded')
+    const maintenance = service.directValidatorMaintenance(tank, 'run')
+    service.completeValidatorMaintenance(healer, 'run', maintenance.instructionId, true)
+    expect(service.getRun('run').slots.healer.readiness).toBe('healthy')
+
+    const resumed = service.resumeDispatch(tank, 'run')
+    expect(resumed.controlState).toBe('normal')
+    expect(() => service.claimTask(dps, 'run', 'task')).not.toThrow()
+  })
+
+  it('keeps a healer-caused pause when the Commander returns, while the tank itself recovers', () => {
+    const { service } = harness()
+    assignedParty(service)
+    service.observeAgentDisposed(healer.sessionId, 'healer agent disposed')
+    service.observeAgentDisposed(tank.sessionId, 'tank agent disposed')
+    expect(service.getRun('run').controlState).toBe('paused')
+
+    const recovered = service.recoverRunAfterCommanderReturn(tank, 'run')
+
+    expect(recovered.controlState).toBe('paused')
+    expect(recovered.slots.tank).toMatchObject({ lifeState: 'alive', readiness: 'healthy' })
+    expect(recovered.commanderRescueTickets[0]).toMatchObject({ status: 'completed' })
+    expect(() => service.resumeDispatch(tank, 'run')).toThrowError(
+      expect.objectContaining({ code: 'HEALER_NOT_RECOVERED' }),
+    )
   })
 })
