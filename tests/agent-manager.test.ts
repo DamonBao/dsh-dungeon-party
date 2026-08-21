@@ -45,6 +45,7 @@ function setup(workspaceRoot = '/workspace') {
   const tankSend = vi.fn()
   const tankAgent = {
     id: 'tank',
+    options: { provider: 'deepseek', model: 'deepseek-chat' },
     ctx: { agents: { create, resume } },
     cancel: tankCancel,
     whenIdle: tankWhenIdle,
@@ -70,6 +71,7 @@ describe('PartyAgentManager', () => {
     expect(run.slots.healer).toMatchObject({ currentSessionId: 'run-healer-g1', generation: 1 })
     expect(create).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'run-healer-g1',
+      agentOptions: { provider: 'deepseek', model: 'deepseek-chat' },
       meta: expect.objectContaining({ cwd: '/workspace', parentSession: 'tank', origin: 'subagent', agentPreset: 'dungeon-party' }),
     }))
     expect(composeFrom).toHaveBeenCalledTimes(1)

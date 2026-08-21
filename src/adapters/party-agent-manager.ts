@@ -267,6 +267,7 @@ export class PartyAgentManager {
           if (!tankAgent) throw new DungeonError('TANK_AGENT_UNAVAILABLE', 'The bound tank Agent is not live')
           handle = await tankAgent.ctx.agents.resume({
             resumeSessionId: request.targetSessionId as SessionId,
+            agentOptions: { ...tankAgent.options },
             setup: async (agentCtx: Context) => {
               this.presets.composeFrom(agentCtx, tankAgent.ctx)
               agentCtx.tools.restrict({ allow: roleTools[request.targetSlot] })
@@ -319,6 +320,7 @@ export class PartyAgentManager {
     const sessionId = `${runId}-${request.targetSlot}-g${generation}`
     const handle = await tankAgent.ctx.agents.create({
       sessionId: sessionId as SessionId,
+      agentOptions: { ...tankAgent.options },
       meta: {
         cwd: run.workspaceRoot,
         parentSession: tankSessionId as SessionId,
@@ -579,6 +581,7 @@ export class PartyAgentManager {
     if (!tankAgent) throw new DungeonError('TANK_AGENT_UNAVAILABLE', 'The bound tank Agent is not live')
     const handle = await tankAgent.ctx.agents.resume({
       resumeSessionId: sessionId as SessionId,
+      agentOptions: { ...tankAgent.options },
       setup: async (agentCtx: Context) => {
         this.presets.composeFrom(agentCtx, tankAgent.ctx)
         agentCtx.tools.restrict({ allow: roleTools[slot] })
@@ -602,6 +605,7 @@ export class PartyAgentManager {
     const sessionId = `${runId}-${slot}-g${generation}`
     const handle = await tankAgent.ctx.agents.create({
       sessionId: sessionId as SessionId,
+      agentOptions: { ...tankAgent.options },
       meta: {
         cwd: run.workspaceRoot,
         parentSession: actor.sessionId as SessionId,
