@@ -29,7 +29,7 @@
     dungeonParty: true
   config:
     - id: dungeon-party
-      name: dsh-dungeon-party
+      name: dsh-dungeon-party/runtime
 
 # Initial engineering surface. Dungeon role tools still perform exact Session
 # identity checks, so visibility is not treated as authorization.

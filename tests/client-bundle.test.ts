@@ -9,6 +9,14 @@ describe('DSH rc8 client bundle', () => {
       exports: Record<string, { default?: string }>
     }
     expect(pkg.exports['./client']?.default).toBe('./lib/client.js')
+    expect(pkg.exports['.']?.default).toBe('./lib/preset-sync.js')
+    expect(pkg.exports['./runtime']?.default).toBe('./lib/index.js')
+
+    const hostPatch = await readFile(new URL('cordis.patch.yml', root), 'utf8')
+    expect(hostPatch).toContain('name: dsh-dungeon-party')
+    expect(hostPatch).not.toContain('dsh-dungeon-party/preset-sync')
+    const preset = await readFile(new URL('preset/dungeon-party/agent.cordis.yml', root), 'utf8')
+    expect(preset).toContain('name: dsh-dungeon-party/runtime')
 
     const bundle = await readFile(new URL('lib/client.js', root), 'utf8')
     expect(bundle).toContain('window.__ModuleLoader__.load')

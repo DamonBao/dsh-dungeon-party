@@ -3,10 +3,14 @@
   "version": "0.1.0",
   "description": "DSH five-agent dungeon party orchestration plugin",
   "type": "module",
-  "main": "./lib/index.js",
-  "types": "./lib/types/index.d.ts",
+  "main": "./lib/preset-sync.js",
+  "types": "./lib/types/preset-sync.d.ts",
   "exports": {
     ".": {
+      "types": "./lib/types/preset-sync.d.ts",
+      "default": "./lib/preset-sync.js"
+    },
+    "./runtime": {
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
