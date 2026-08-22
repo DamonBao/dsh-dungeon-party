@@ -18,8 +18,9 @@ export class SessionDungeonEventStore implements DungeonEventStore {
   private readonly runSessions = new Map<string, Session>()
   /** Per-run event index so load() stops rescanning/cloning the whole log. */
   private readonly eventCache = new Map<string, DungeonEvent[]>()
+  private readonly eventIndexes = new Map<string, Map<string, DungeonEvent>>()
   private readonly cacheSessions = new Map<string, Session>()
-  private projectionCounter = 0
+  private readonly projectionCounters = new Map<string, number>()
   private readonly lastProjectedPhase = new Map<string, string>()
   private static readonly PROJECTION_INTERVAL = 20
 
@@ -28,7 +29,9 @@ export class SessionDungeonEventStore implements DungeonEventStore {
   append(event: DungeonEvent): void {
     const canonicalEvent = jsonClone(event)
     const existing = this.load(canonicalEvent.runId)
-    const duplicate = existing.find((item) => item.eventId === canonicalEvent.eventId)
+    const eventIndex = this.eventIndexes.get(canonicalEvent.runId) ?? new Map(existing.map((item) => [item.eventId, item]))
+    this.eventIndexes.set(canonicalEvent.runId, eventIndex)
+    const duplicate = eventIndex.get(canonicalEvent.eventId)
     if (duplicate) {
       if (JSON.stringify(duplicate) !== JSON.stringify(canonicalEvent)) {
         throw new DungeonError('EVENT_ID_CONFLICT', `Event ${canonicalEvent.eventId} already exists with different content`)
@@ -48,6 +51,7 @@ export class SessionDungeonEventStore implements DungeonEventStore {
     const cached = this.eventCache.get(canonicalEvent.runId)
     if (cached) cached.push(canonicalEvent)
     else this.eventCache.set(canonicalEvent.runId, [canonicalEvent])
+    eventIndex.set(canonicalEvent.eventId, canonicalEvent)
   }
 
   publishProjection(run: DungeonRun): void {
@@ -57,12 +61,15 @@ export class SessionDungeonEventStore implements DungeonEventStore {
     // dungeon/event entries. Snapshot on phase transitions (and terminal
     // phases) plus at most one full projection per PROJECTION_INTERVAL calls
     // so per-event append cost no longer grows with run size.
-    this.projectionCounter += 1
+    const projectionCounter = (this.projectionCounters.get(run.id) ?? 0) + 1
+    this.projectionCounters.set(run.id, projectionCounter)
     const phase = run.phase
     const phaseChanged = !this.lastProjectedPhase.has(run.id) || this.lastProjectedPhase.get(run.id) !== phase
     const terminal = phase === 'COMPLETED' || phase === 'FAILED' || phase === 'CANCELLED'
-    if (!phaseChanged && !terminal && this.projectionCounter % SessionDungeonEventStore.PROJECTION_INTERVAL !== 0) return
-    session.append('dungeon/projection', jsonClone(run))
+    if (!phaseChanged && !terminal && projectionCounter % SessionDungeonEventStore.PROJECTION_INTERVAL !== 0) return
+    // Session.append validates, snapshots and freezes the JSON value, so an
+    // extra JSON round-trip here would only duplicate work on the hot path.
+    session.append('dungeon/projection', run)
     this.lastProjectedPhase.set(run.id, phase)
   }
 
@@ -74,6 +81,12 @@ export class SessionDungeonEventStore implements DungeonEventStore {
       }
     }
     return [...runIds].sort()
+  }
+
+  loadAfter(runId: string, afterSequence: number): DungeonEvent[] {
+    // Run sequences are contiguous and one-based, so the cursor is also the
+    // zero-based slice offset. Return only the small unread tail.
+    return this.load(runId).slice(afterSequence)
   }
 
   load(runId: string): DungeonEvent[] {
@@ -94,6 +107,7 @@ export class SessionDungeonEventStore implements DungeonEventStore {
     }
     events.sort((left, right) => left.sequence - right.sequence)
     this.eventCache.set(runId, events)
+    this.eventIndexes.set(runId, new Map(events.map((event) => [event.eventId, event])))
     this.cacheSessions.set(runId, session)
     return events
   }

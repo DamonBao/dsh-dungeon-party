@@ -1,6 +1,6 @@
 import type { AgentRegistry } from '@deepseek-ai/dsh-agent';
 import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets';
-import { type Actor, type DungeonService, type ExecutionReport, type PartyMessageInput, type PartySlot, type RunPhase } from '../service/dungeon-service.js';
+import { type Actor, type CheckpointRequest, type CommanderRescueTicket, type DungeonService, type ExecutionReport, type PartyMessage, type PartyMessageInput, type PartySlot, type RecoveryInstruction, type ResurrectionRequest, type RunPhase, type TaskLease, type TaskRecord } from '../service/dungeon-service.js';
 type ChildSlot = Exclude<PartySlot, 'tank'>;
 export declare class PartyAgentManager {
     private readonly service;
@@ -14,6 +14,8 @@ export declare class PartyAgentManager {
     private readonly pending;
     /** Serializes dispatch per run so concurrent kicks cannot double-assign. */
     private readonly dispatchLocks;
+    /** Serializes lease baselines and submit audits per run. */
+    private readonly workspaceAuditLocks;
     /** Rate-limits dangling-lease turn-end nudges per session. */
     private readonly turnEndNudges;
     /** Last taskSetVersion per run for which a drained-execution notice fired. */
@@ -48,6 +50,7 @@ export declare class PartyAgentManager {
      */
     nudgeAfterTurnEnd(sessionId: string): void;
     private withDispatchLock;
+    private withWorkspaceAuditLock;
     private dispatchAvailableTasksUnlocked;
     /**
      * Orchestration loop closure: when a dispatch pass ends with the run fully
@@ -59,24 +62,28 @@ export declare class PartyAgentManager {
      * changes. Strictly best-effort: it must never break the scheduler.
      */
     private notifyDrainedExecution;
-    executeValidatorMaintenance(actor: Actor, runId: string): Promise<void>;
+    executeValidatorMaintenance(actor: Actor, runId: string): Promise<RecoveryInstruction>;
     dispatchBattleRes(actor: Actor, runId: string, resurrectionId: string): void;
     dispatchCommanderRescue(runId: string, ticketId: string): void;
     ensureMember(actor: Actor, runId: string, slot: ChildSlot): Promise<string>;
-    recoverCommander(actor: Actor, runId: string, ticketId: string): Promise<void>;
-    completeDpsResurrection(actor: Actor, runId: string, resurrectionId: string, mode: 'resume' | 'replace'): Promise<string>;
-    requestCheckpoint(actor: Actor, runId: string, taskId: string): void;
-    beginLeaseAudit(actor: Actor, runId: string, taskId: string, leaseId: string): void;
-    auditWorkspaceBeforeSubmit(actor: Actor, runId: string, report: ExecutionReport): void;
+    recoverCommander(actor: Actor, runId: string, ticketId: string): Promise<CommanderRescueTicket>;
+    completeDpsResurrection(actor: Actor, runId: string, resurrectionId: string, mode: 'resume' | 'replace'): Promise<ResurrectionRequest>;
+    requestCheckpoint(actor: Actor, runId: string, taskId: string): CheckpointRequest;
+    claimTaskWithAudit(actor: Actor, runId: string, taskId: string): Promise<TaskLease>;
+    beginLeaseAudit(actor: Actor, runId: string, taskId: string, leaseId: string): Promise<void>;
+    submitExecutionWithAudit(actor: Actor, runId: string, report: ExecutionReport): Promise<TaskRecord>;
+    auditWorkspaceBeforeSubmit(actor: Actor, runId: string, report: ExecutionReport): Promise<void>;
+    private captureLeaseAudit;
+    private auditWorkspace;
     completeLeaseAudit(runId: string, taskId: string): void;
     /**
      * Re-baseline the workspace audit for an active lease. Called when a
      * checkpoint renews the lease so pre-existing external noise no longer
      * blocks the eventual work_submit.
      */
-    refreshLeaseAudit(runId: string, taskId: string): void;
-    interruptTask(actor: Actor, runId: string, taskId: string, turnId: string): Promise<void>;
-    sendPartyMessage(actor: Actor, runId: string, toSlot: PartySlot, input: PartyMessageInput): void;
+    refreshLeaseAudit(runId: string, taskId: string): Promise<void>;
+    interruptTask(actor: Actor, runId: string, taskId: string, turnId: string): Promise<TaskRecord>;
+    sendPartyMessage(actor: Actor, runId: string, toSlot: PartySlot, input: PartyMessageInput): PartyMessage;
     dispatchTask(actor: Actor, runId: string, taskId: string): void;
     forgetDisposedAgent(sessionId: string): void;
     disposeRun(runId: string): Promise<void>;

@@ -6,6 +6,7 @@ import type {} from '@deepseek-ai/dsh-session-projection'
 
 import {
   DungeonService,
+  defaultDungeonConfig,
   type DungeonConfig,
   type DungeonEventStore,
   type DungeonRun,
@@ -81,9 +82,7 @@ export const Config = z.object({
     commanderDecisionSlaMs: positiveInteger(),
     healerVerificationCommands: z.array(z.string()).default(['npm test', 'npm run typecheck', 'npx tsc --noEmit', 'git status --short', 'git diff --stat', 'git diff --numstat']),
     healerVerificationTimeoutMs: positiveInteger().default(120_000),
-    fingerprintIgnoreScopes: z.array(z.string()).default([
-      '.git/**', 'node_modules/**', 'lib/**', 'dist/**', 'coverage/**', '.dsh/dungeon-party/tmp/**',
-    ]),
+    fingerprintIgnoreScopes: z.array(z.string()).default([...defaultDungeonConfig.fingerprintIgnoreScopes]),
     validationRequired: z.boolean(),
   }),
 })

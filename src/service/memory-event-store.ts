@@ -23,6 +23,12 @@ export class MemoryDungeonEventStore implements DungeonEventStore {
     return [...new Set(this.events.map((event) => event.runId))].sort()
   }
 
+  loadAfter(runId: string, afterSequence: number): DungeonEvent[] {
+    return this.events
+      .filter((event) => event.runId === runId && event.sequence > afterSequence)
+      .map((event) => structuredClone(event))
+  }
+
   load(runId: string): DungeonEvent[] {
     return this.events
       .filter((event) => event.runId === runId)

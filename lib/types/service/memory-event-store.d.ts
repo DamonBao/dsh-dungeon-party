@@ -3,5 +3,6 @@ export declare class MemoryDungeonEventStore implements DungeonEventStore {
     private readonly events;
     append(event: DungeonEvent): void;
     listRunIds(): string[];
+    loadAfter(runId: string, afterSequence: number): DungeonEvent[];
     load(runId: string): DungeonEvent[];
 }

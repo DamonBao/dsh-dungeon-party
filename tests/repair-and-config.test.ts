@@ -140,6 +140,7 @@ describe('dungeon configuration', () => {
   it('falls back to default fingerprintIgnoreScopes when input is an empty array', () => {
     const config = resolveDungeonConfig({ fingerprintIgnoreScopes: [] })
     expect(config.fingerprintIgnoreScopes).toEqual(defaultDungeonConfig.fingerprintIgnoreScopes)
+    expect(config.fingerprintIgnoreScopes).toContain('.npm-cache/**')
     expect(config.fingerprintIgnoreScopes.length).toBeGreaterThan(0)
   })
 

@@ -214,6 +214,17 @@ describe('DungeonPartyOverlay', () => {
     expect(renderer.root.findAllByProps({ 'aria-label': '打开副本面板' })).toHaveLength(0)
   })
 
+  it('serializes raw projection data only after developer details open', () => {
+    const renderer = renderOverlay(runProjection())
+    switchTab(renderer, '指挥')
+    const details = renderer.root.findByProps({ className: 'dp-raw' })
+    expect(renderer.root.findAllByType('pre')).toHaveLength(0)
+    act(() => details.props.onToggle({ currentTarget: { open: true } }))
+    expect(renderer.root.findAllByType('pre')).toHaveLength(1)
+    act(() => details.props.onToggle({ currentTarget: { open: false } }))
+    expect(renderer.root.findAllByType('pre')).toHaveLength(0)
+  })
+
   it('requires confirmation before queuing a recovery instruction', async () => {
     const run = runProjection()
     const requestAction = vi.fn(async () => true)

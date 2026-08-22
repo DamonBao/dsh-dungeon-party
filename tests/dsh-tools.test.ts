@@ -1,22 +1,30 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { validateJsonSchemaValue, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 import { DungeonService, type DungeonEvent } from '../src/service/dungeon-service.js'
 import { registerDungeonTools, boundedText } from '../src/tools/register.js'
 import { addDungeonTypes, DUNGEON_SESSION_EVENT_TYPES } from '../src/session-event-compat.js'
 
-// The two-phase party_finish test needs the workspace fingerprint to change
-// exactly between finishRun's first computation and its recompute callback.
-// Mocking the adapter (delegating to the real implementation by default)
-// gives each test deterministic control without touching the shared workspace.
+// The two-phase party_finish test needs the queued workspace fingerprint to
+// change exactly between preparation and the recompute callback.
 const { fingerprintMock } = vi.hoisted(() => ({ fingerprintMock: vi.fn() }))
 
-vi.mock('../src/adapters/workspace-fingerprint.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/adapters/workspace-fingerprint.js')>()
-  fingerprintMock.mockImplementation(actual.computeWorkspaceFingerprint)
-  return { ...actual, computeWorkspaceFingerprint: fingerprintMock }
+vi.mock('../src/adapters/workspace-computation-queue.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/adapters/workspace-computation-queue.js')>()
+  const fingerprint = await vi.importActual<typeof import('../src/adapters/workspace-fingerprint.js')>(
+    '../src/adapters/workspace-fingerprint.js',
+  )
+  fingerprintMock.mockImplementation(async (root: string, scopes: string[]) =>
+    fingerprint.computeWorkspaceFingerprint(root, scopes))
+  return {
+    ...actual,
+    workspaceComputationQueue: {
+      snapshot: actual.workspaceComputationQueue.snapshot.bind(actual.workspaceComputationQueue),
+      fingerprint: fingerprintMock,
+    },
+  }
 })
 
 function setup(agentManager?: Parameters<typeof registerDungeonTools>[2]) {
@@ -36,6 +44,15 @@ function setup(agentManager?: Parameters<typeof registerDungeonTools>[2]) {
   const context = {
     tools: {
       register(definition: ToolDefinition) {
+        const execute = definition.execute.bind(definition)
+        definition.execute = async (args, exec) => {
+          const value = await execute(args, exec)
+          const violations = validateJsonSchemaValue(definition.output.schema, value)
+          if (violations.length > 0) {
+            throw new Error(`${definition.name} returned a value outside its output schema: ${violations.join('; ')}`)
+          }
+          return value
+        }
         definitions.push(definition)
         return () => undefined
       },
@@ -92,6 +109,28 @@ describe('DSH dungeon tools', () => {
     ])
 
     expect(() => dispose()).not.toThrow()
+  })
+
+  it('declares explicit structured output schemas without generic JSON nodes', () => {
+    const { definitions } = setup()
+    const visit = (node: unknown, path: string, requireClosedObject = true): void => {
+      expect(node, path).toBeTypeOf('object')
+      const schema = node as Record<string, unknown>
+      expect(schema.type, `${path} must not use generic JSON`).not.toBe('json')
+      if (schema.type === 'array') expect(schema.items, `${path}.items must be explicit`).toBeDefined()
+      if (schema.type === 'object' && requireClosedObject) {
+        expect(schema.additionalProperties, `${path} must be closed`).toBe(false)
+      }
+      if (schema.items) visit(schema.items, `${path}.items`)
+      if (Array.isArray(schema.oneOf)) schema.oneOf.forEach((branch, index) => visit(branch, `${path}.oneOf[${index}]`))
+      if (schema.properties && typeof schema.properties === 'object') {
+        for (const [key, child] of Object.entries(schema.properties)) visit(child, `${path}.properties.${key}`)
+      }
+    }
+    for (const definition of definitions) {
+      visit(definition.parameters, `${definition.name}.parameters`, false)
+      visit(definition.output.schema, `${definition.name}.output`)
+    }
   })
 
   it('derives the tank identity from the executing DSH agent', async () => {

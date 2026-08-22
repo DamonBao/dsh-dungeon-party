@@ -388,7 +388,7 @@ describe('DungeonService', () => {
     )
   })
 
-  it('rejects incomplete pass reports and completes only the validated workspace version', () => {
+  it('rejects incomplete pass reports and completes only the validated workspace version', async () => {
     const { service } = setup()
     const run = createReadyRun(service)
     service.assignTask(tank, run.id, 'task-1', 'dps-1')
@@ -450,7 +450,7 @@ describe('DungeonService', () => {
       summary: 'Conflicting retry',
     })).toThrowError(expect.objectContaining({ code: 'IDEMPOTENCY_CONFLICT' }))
 
-    expect(() => service.finishRun(tank, run.id, 'Summary', 'fingerprint-v2')).toThrowError(
+    await expect(service.finishRun(tank, run.id, 'Summary', 'fingerprint-v2')).rejects.toThrowError(
       expect.objectContaining({ code: 'STALE_VALIDATION' }),
     )
     for (const kind of ['tool-failure', 'queue-pressure'] as const) {
@@ -459,14 +459,14 @@ describe('DungeonService', () => {
         windowMs: 120_000, evidence: [kind],
       })
     }
-    expect(() => service.finishRun(tank, run.id, 'Summary', 'fingerprint-v1')).toThrowError(
+    await expect(service.finishRun(tank, run.id, 'Summary', 'fingerprint-v1')).rejects.toThrowError(
       expect.objectContaining({ code: 'MEMBER_NOT_READY' }),
     )
     const maintenance = service.directValidatorMaintenance(tank, run.id)
     service.completeValidatorMaintenance(healer, run.id, maintenance.instructionId, true)
-    expect(service.finishRun(tank, run.id, 'Implemented and tested', 'fingerprint-v1').phase).toBe(
-      'COMPLETED',
-    )
+    await expect(service.finishRun(tank, run.id, 'Implemented and tested', 'fingerprint-v1')).resolves.toMatchObject({
+      phase: 'COMPLETED',
+    })
   })
 
   it('rejects a pass report containing major findings', () => {
@@ -518,13 +518,13 @@ describe('DungeonService', () => {
     ).toThrowError(expect.objectContaining({ code: 'PASS_HAS_BLOCKING_FINDINGS' }))
   })
 
-  it('completes a run in two phases when the recomputed workspace fingerprint matches', () => {
+  it('completes a run in two phases when the recomputed workspace fingerprint matches', async () => {
     const { service, persisted } = setup()
     const manifest = validatingRun(service)
     service.submitValidation(healer, 'run-1', passSubmission(manifest, 'validation-1'))
 
     let recomputations = 0
-    const completed = service.finishRun(tank, 'run-1', 'Implemented and tested', 'fingerprint-v1', () => {
+    const completed = await service.finishRun(tank, 'run-1', 'Implemented and tested', 'fingerprint-v1', () => {
       recomputations += 1
       return 'fingerprint-v1'
     })
@@ -538,14 +538,14 @@ describe('DungeonService', () => {
     expect(persisted.some((event) => event.type === 'dungeon/run-completion-aborted')).toBe(false)
   })
 
-  it('aborts completion, stales reports, and stays validating when the workspace changed', () => {
+  it('aborts completion, stales reports, and stays validating when the workspace changed', async () => {
     const { service, persisted } = setup()
     const manifest = validatingRun(service)
     service.submitValidation(healer, 'run-1', passSubmission(manifest, 'validation-1'))
 
     let error: DungeonError | undefined
     try {
-      service.finishRun(tank, 'run-1', 'Implemented and tested', 'fingerprint-v1', () => 'fingerprint-v2')
+      await service.finishRun(tank, 'run-1', 'Implemented and tested', 'fingerprint-v1', () => 'fingerprint-v2')
     } catch (caught) {
       error = caught as DungeonError
     }
@@ -572,15 +572,15 @@ describe('DungeonService', () => {
     expect(after.validationReports.at(-1)?.status).toBe('stale')
 
     // The stale report can no longer complete the run even against a stable workspace.
-    expect(() =>
+    await expect(
       service.finishRun(tank, 'run-1', 'Implemented and tested', 'fingerprint-v1', () => 'fingerprint-v1'),
-    ).toThrowError(expect.objectContaining({ code: 'VALIDATION_REQUIRED' }))
+    ).rejects.toThrowError(expect.objectContaining({ code: 'VALIDATION_REQUIRED' }))
 
     // A fresh manifest and pass report for the changed workspace complete the run.
     const nextManifest = service.createValidationManifest(tank, 'run-1', 'fingerprint-v2')
     expect(nextManifest).toMatchObject({ manifestVersion: 2, workspaceFingerprint: 'fingerprint-v2' })
     service.submitValidation(healer, 'run-1', passSubmission(nextManifest, 'validation-2'))
-    const completed = service.finishRun(tank, 'run-1', 'Implemented and tested', 'fingerprint-v2', () => 'fingerprint-v2')
+    const completed = await service.finishRun(tank, 'run-1', 'Implemented and tested', 'fingerprint-v2', () => 'fingerprint-v2')
     expect(completed.phase).toBe('COMPLETED')
   })
 

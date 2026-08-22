@@ -290,9 +290,16 @@ export interface DungeonEvent<T = unknown> {
     occurredAt: string;
     payload: T;
 }
+export interface ExecutionGuardView {
+    workspaceRoot: string;
+    taskId: string;
+    writeScopes: string[];
+    globalCommands: string[];
+}
 export interface DungeonEventStore {
     append(event: DungeonEvent): void;
     load(runId: string): DungeonEvent[];
+    loadAfter?(runId: string, afterSequence: number): DungeonEvent[];
     publishProjection?(run: DungeonRun): void;
     listRunIds?(): string[];
 }
@@ -420,7 +427,7 @@ export declare class DungeonService {
     observeWorkspaceFingerprint(runId: string, workspaceFingerprint: string): DungeonRun;
     createValidationManifest(actor: Actor, runId: string, workspaceFingerprint: string): ValidationManifest;
     submitValidation(actor: Actor, runId: string, submission: ValidationSubmission): ValidationReport;
-    finishRun(actor: Actor, runId: string, resultSummary: string, workspaceFingerprint: string, recomputeFingerprint?: () => string): DungeonRun;
+    finishRun(actor: Actor, runId: string, resultSummary: string, workspaceFingerprint: string, recomputeFingerprint?: () => string | Promise<string>): Promise<DungeonRun>;
     waitForChange(actor: Actor, runId: string, afterSequence: number, timeoutMs?: number, signal?: AbortSignal): Promise<DungeonWaitResult>;
     sendPartyMessage(actor: Actor, runId: string, toSlot: PartySlot, input: PartyMessageInput): PartyMessage;
     getFingerprintIgnoreScopes(): string[];
@@ -430,7 +437,12 @@ export declare class DungeonService {
     getHealerVerificationTimeoutMs(): number;
     /** Enumerate in-memory run ids for watchdog sweeps and diagnostics. */
     listRunIds(): string[];
+    /** Enumerate only mutable runs without cloning historical terminal state. */
+    listActiveRunIds(): string[];
     getRun(runId: string): DungeonRun;
+    /** Return the minimal immutable data needed by the high-frequency tool guard. */
+    getExecutionGuardView(runId: string, slot: DpsSlot): ExecutionGuardView | undefined;
+    assertRunAccess(actor: Actor, runId: string): void;
     getRunForActor(actor: Actor, runId: string): DungeonRun;
     private append;
     private reduce;

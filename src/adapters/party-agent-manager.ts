@@ -9,18 +9,26 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import {
   DungeonError,
   type Actor,
+  type CheckpointRequest,
+  type CommanderRescueTicket,
   type DungeonRun,
   type DungeonService,
+  type DpsSlot,
   type ExecutionReport,
+  type PartyMessage,
   type PartyMessageInput,
   type PartySlot,
+  type RecoveryInstruction,
+  type ResurrectionRequest,
   type RunPhase,
+  type TaskLease,
+  type TaskRecord,
 } from '../service/dungeon-service.js'
 import {
-  createWorkspaceSnapshot,
   diffWorkspaceSnapshots,
   type WorkspaceSnapshot,
 } from './workspace-fingerprint.js'
+import { workspaceComputationQueue } from './workspace-computation-queue.js'
 
 type ChildSlot = Exclude<PartySlot, 'tank'>
 
@@ -46,6 +54,8 @@ export class PartyAgentManager {
   private readonly pending = new Map<string, Promise<string>>()
   /** Serializes dispatch per run so concurrent kicks cannot double-assign. */
   private readonly dispatchLocks = new Map<string, Promise<unknown>>()
+  /** Serializes lease baselines and submit audits per run. */
+  private readonly workspaceAuditLocks = new Map<string, Promise<unknown>>()
   /** Rate-limits dangling-lease turn-end nudges per session. */
   private readonly turnEndNudges = new Map<string, number>()
   /** Last taskSetVersion per run for which a drained-execution notice fired. */
@@ -121,7 +131,7 @@ export class PartyAgentManager {
    * nudge to a tank alert using the service's own clock.
    */
   async runWatchdog(): Promise<void> {
-    for (const runId of this.service.listRunIds()) {
+    for (const runId of this.service.listActiveRunIds()) {
       let run: DungeonRun
       try {
         run = this.service.getRun(runId)
@@ -189,7 +199,7 @@ export class PartyAgentManager {
     const now = Date.now()
     const last = this.turnEndNudges.get(sessionId)
     if (last !== undefined && now - last < 60_000) return
-    for (const runId of this.service.listRunIds()) {
+    for (const runId of this.service.listActiveRunIds()) {
       let run: DungeonRun
       try {
         run = this.service.getRun(runId)
@@ -224,6 +234,17 @@ export class PartyAgentManager {
       return await chained
     } finally {
       if (this.dispatchLocks.get(runId) === chained) this.dispatchLocks.delete(runId)
+    }
+  }
+
+  private async withWorkspaceAuditLock<T>(runId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.workspaceAuditLocks.get(runId) ?? Promise.resolve()
+    const chained = previous.catch(() => undefined).then(operation)
+    this.workspaceAuditLocks.set(runId, chained)
+    try {
+      return await chained
+    } finally {
+      if (this.workspaceAuditLocks.get(runId) === chained) this.workspaceAuditLocks.delete(runId)
     }
   }
 
@@ -308,7 +329,7 @@ export class PartyAgentManager {
     }
   }
 
-  async executeValidatorMaintenance(actor: Actor, runId: string): Promise<void> {
+  async executeValidatorMaintenance(actor: Actor, runId: string): Promise<RecoveryInstruction> {
     const instruction = this.service.directValidatorMaintenance(actor, runId)
     const run = this.service.getRun(runId)
     const healerSessionId = run.slots.healer.currentSessionId!
@@ -339,6 +360,7 @@ export class PartyAgentManager {
       }],
       source: { kind: 'plugin', plugin: 'dsh-dungeon-party', form: 'relay' },
     }), 'next-turn', true)
+    return instruction
   }
 
   dispatchBattleRes(actor: Actor, runId: string, resurrectionId: string): void {
@@ -388,7 +410,7 @@ export class PartyAgentManager {
     }
   }
 
-  async recoverCommander(actor: Actor, runId: string, ticketId: string): Promise<void> {
+  async recoverCommander(actor: Actor, runId: string, ticketId: string): Promise<CommanderRescueTicket> {
     const run = this.service.getRunForActor(actor, runId)
     const ticket = run.commanderRescueTickets.find((item) => item.ticketId === ticketId)
     if (ticket?.status !== 'consumed') {
@@ -396,6 +418,7 @@ export class PartyAgentManager {
     }
     let commander = this.agents.get(ticket.targetSessionId as SessionId)
     let resumedHandle: AgentHandle | undefined
+    let completed: CommanderRescueTicket | undefined
     try {
       if (commander) {
         commander.cancel(
@@ -412,7 +435,7 @@ export class PartyAgentManager {
         })
         commander = resumedHandle.agent
       }
-      this.service.completeCommanderResurrection(actor, runId, ticketId, {
+      completed = this.service.completeCommanderResurrection(actor, runId, ticketId, {
         success: true,
         sessionId: String(commander.id),
       })
@@ -426,6 +449,7 @@ export class PartyAgentManager {
     }
     if (resumedHandle) this.commanderHandles.set(runId, resumedHandle)
     const recovered = this.service.getRun(runId)
+    if (!completed) throw new DungeonError('COMMANDER_RECOVERY_INCOMPLETE', 'Commander recovery produced no ticket result')
     commander.send(createUserMessage({
       content: [{
         type: 'text',
@@ -433,6 +457,7 @@ export class PartyAgentManager {
       }],
       source: { kind: 'plugin', plugin: 'dsh-dungeon-party', form: 'relay' },
     }), 'next-turn', true)
+    return completed
   }
 
   async completeDpsResurrection(
@@ -440,7 +465,7 @@ export class PartyAgentManager {
     runId: string,
     resurrectionId: string,
     mode: 'resume' | 'replace',
-  ): Promise<string> {
+  ): Promise<ResurrectionRequest> {
     const run = this.service.getRunForActor(actor, runId)
     const request = run.resurrectionRequests.find((item) => item.resurrectionId === resurrectionId)
     if (request?.status !== 'consumed') {
@@ -498,7 +523,7 @@ export class PartyAgentManager {
         throw error
       }
       const sessionId = String(handle.agent.id)
-      this.service.completeBattleRes(actor, runId, resurrectionId, { success: true, mode, sessionId })
+      const completed = this.service.completeBattleRes(actor, runId, resurrectionId, { success: true, mode, sessionId })
       handle.agent.send(createUserMessage({
         content: [{
           type: 'text',
@@ -506,7 +531,7 @@ export class PartyAgentManager {
         }],
         source: { kind: 'plugin', plugin: 'dsh-dungeon-party', form: 'relay' },
       }), 'next-turn', true)
-      return sessionId
+      return completed
     }
     const tankSessionId = run.slots.tank.currentSessionId
     if (!tankSessionId) throw new DungeonError('TANK_AGENT_UNAVAILABLE', 'The run has no bound tank')
@@ -536,8 +561,9 @@ export class PartyAgentManager {
       },
     })
     this.ensureSubagentDescriptor(handle.agent, runId, request.targetSlot)
+    let completed: ResurrectionRequest
     try {
-      this.service.completeBattleRes(actor, runId, resurrectionId, {
+      completed = this.service.completeBattleRes(actor, runId, resurrectionId, {
         success: true,
         mode: 'replace',
         sessionId: String(handle.agent.id),
@@ -548,10 +574,10 @@ export class PartyAgentManager {
     }
     this.handles.set(key, handle)
     if (previousHandle) await previousHandle.dispose()
-    return String(handle.agent.id)
+    return completed
   }
 
-  requestCheckpoint(actor: Actor, runId: string, taskId: string): void {
+  requestCheckpoint(actor: Actor, runId: string, taskId: string): CheckpointRequest {
     const request = this.service.requestTaskCheckpoint(actor, runId, taskId)
     const handle = this.handles.get(keyFor(runId, request.slot))
     if (!handle) throw new DungeonError('DPS_AGENT_UNAVAILABLE', `Agent for ${request.slot} is not live`)
@@ -562,25 +588,51 @@ export class PartyAgentManager {
       }],
       source: { kind: 'plugin', plugin: 'dsh-dungeon-party', form: 'relay' },
     }), 'next-step', true)
+    return request
   }
 
-  beginLeaseAudit(actor: Actor, runId: string, taskId: string, leaseId: string): void {
+  async claimTaskWithAudit(actor: Actor, runId: string, taskId: string): Promise<TaskLease> {
+    return this.withWorkspaceAuditLock(runId, async () => {
+      const lease = this.service.claimTask(actor, runId, taskId)
+      await this.captureLeaseAudit(actor, runId, taskId, lease.leaseId)
+      return lease
+    })
+  }
+
+  async beginLeaseAudit(actor: Actor, runId: string, taskId: string, leaseId: string): Promise<void> {
+    await this.withWorkspaceAuditLock(runId, () => this.captureLeaseAudit(actor, runId, taskId, leaseId))
+  }
+
+  async submitExecutionWithAudit(actor: Actor, runId: string, report: ExecutionReport): Promise<TaskRecord> {
+    return this.withWorkspaceAuditLock(runId, async () => {
+      await this.auditWorkspace(actor, runId, report)
+      const task = this.service.submitExecution(actor, runId, report)
+      this.completeLeaseAudit(runId, report.taskId)
+      return task
+    })
+  }
+
+  async auditWorkspaceBeforeSubmit(actor: Actor, runId: string, report: ExecutionReport): Promise<void> {
+    await this.withWorkspaceAuditLock(runId, () => this.auditWorkspace(actor, runId, report))
+  }
+
+  private async captureLeaseAudit(actor: Actor, runId: string, taskId: string, leaseId: string): Promise<void> {
     const run = this.service.getRunForActor(actor, runId)
     const task = run.tasks[taskId]
     if (task?.activeLease?.leaseId !== leaseId) throw new DungeonError('STALE_LEASE', 'Cannot audit a stale lease')
     this.leaseAudits.set(`${runId}:${taskId}`, {
       leaseId,
-      snapshot: createWorkspaceSnapshot(run.workspaceRoot, this.service.getFingerprintIgnoreScopes()),
+      snapshot: await workspaceComputationQueue.snapshot(run.workspaceRoot, this.service.getFingerprintIgnoreScopes()),
     })
   }
 
-  auditWorkspaceBeforeSubmit(actor: Actor, runId: string, report: ExecutionReport): void {
+  private async auditWorkspace(actor: Actor, runId: string, report: ExecutionReport): Promise<void> {
     const run = this.service.getRunForActor(actor, runId)
     const audit = this.leaseAudits.get(`${runId}:${report.taskId}`)
     if (!audit || audit.leaseId !== report.leaseId) {
       throw new DungeonError('WORKSPACE_AUDIT_MISSING', 'The active lease has no host workspace baseline')
     }
-    const current = createWorkspaceSnapshot(run.workspaceRoot, this.service.getFingerprintIgnoreScopes())
+    const current = await workspaceComputationQueue.snapshot(run.workspaceRoot, this.service.getFingerprintIgnoreScopes())
     const changedFiles = diffWorkspaceSnapshots(audit.snapshot, current)
     const activeScopes = Object.values(run.tasks).flatMap((task) => task.activeLease ? task.workOrder.writeScopes : [])
     const outsideActiveScopes = changedFiles.filter((path) =>
@@ -612,16 +664,18 @@ export class PartyAgentManager {
    * checkpoint renews the lease so pre-existing external noise no longer
    * blocks the eventual work_submit.
    */
-  refreshLeaseAudit(runId: string, taskId: string): void {
-    const audit = this.leaseAudits.get(`${runId}:${taskId}`)
-    if (!audit) return
-    const run = this.service.getRun(runId)
-    const task = run.tasks[taskId]
-    if (!task?.activeLease || task.activeLease.leaseId !== audit.leaseId) return
-    audit.snapshot = createWorkspaceSnapshot(run.workspaceRoot, this.service.getFingerprintIgnoreScopes())
+  async refreshLeaseAudit(runId: string, taskId: string): Promise<void> {
+    await this.withWorkspaceAuditLock(runId, async () => {
+      const audit = this.leaseAudits.get(`${runId}:${taskId}`)
+      if (!audit) return
+      const run = this.service.getRun(runId)
+      const task = run.tasks[taskId]
+      if (!task?.activeLease || task.activeLease.leaseId !== audit.leaseId) return
+      audit.snapshot = await workspaceComputationQueue.snapshot(run.workspaceRoot, this.service.getFingerprintIgnoreScopes())
+    })
   }
 
-  async interruptTask(actor: Actor, runId: string, taskId: string, turnId: string): Promise<void> {
+  async interruptTask(actor: Actor, runId: string, taskId: string, turnId: string): Promise<TaskRecord> {
     const task = this.service.requestTaskInterrupt(actor, runId, taskId, turnId)
     if (!task.ownerSlot) throw new DungeonError('TASK_NOT_ASSIGNED', `Task ${taskId} has no DPS owner`)
     const handle = this.handles.get(keyFor(runId, task.ownerSlot))
@@ -644,11 +698,11 @@ export class PartyAgentManager {
     const quarantinedFiles = audit
       ? diffWorkspaceSnapshots(
           audit.snapshot,
-          createWorkspaceSnapshot(run.workspaceRoot, this.service.getFingerprintIgnoreScopes()),
+          await workspaceComputationQueue.snapshot(run.workspaceRoot, this.service.getFingerprintIgnoreScopes()),
         )
       : []
     this.leaseAudits.delete(`${runId}:${taskId}`)
-    this.service.completeTaskInterrupt(runId, taskId, turnId, {
+    return this.service.completeTaskInterrupt(runId, taskId, turnId, {
       success: true,
       quarantinedFiles,
     })
@@ -659,7 +713,7 @@ export class PartyAgentManager {
     runId: string,
     toSlot: PartySlot,
     input: PartyMessageInput,
-  ): void {
+  ): PartyMessage {
     const run = this.service.getRunForActor(actor, runId)
     const targetSessionId = run.slots[toSlot].currentSessionId
     if (!targetSessionId) throw new DungeonError('UNBOUND_SLOT', `Target slot ${toSlot} is not bound`)
@@ -672,6 +726,7 @@ export class PartyAgentManager {
       content: [{ type: 'text', text: `Dungeon-party message:\n${JSON.stringify(message, null, 2)}` }],
       source: { kind: 'plugin', plugin: 'dsh-dungeon-party', form: 'relay' },
     }), 'next-step', true)
+    return message
   }
 
   dispatchTask(actor: Actor, runId: string, taskId: string): void {
@@ -721,6 +776,7 @@ export class PartyAgentManager {
       if (key.startsWith(prefix)) this.leaseAudits.delete(key)
     }
     this.drainNoticeTaskSetVersions.delete(runId)
+    this.workspaceAuditLocks.delete(runId)
     const commanderHandle = this.commanderHandles.get(runId)
     if (commanderHandle) {
       this.commanderHandles.delete(runId)
@@ -734,6 +790,7 @@ export class PartyAgentManager {
     this.handles.clear()
     this.commanderHandles.clear()
     this.leaseAudits.clear()
+    this.workspaceAuditLocks.clear()
     this.drainNoticeTaskSetVersions.clear()
     await Promise.all(handles.map((handle) => handle.dispose()))
   }
@@ -746,14 +803,11 @@ export class PartyAgentManager {
     this.installExecutionGuard(agentCtx, runId, slot)
   }
 
-  private installExecutionGuard(agentCtx: Context, runId: string, slot: ChildSlot): void {
+  private installExecutionGuard(agentCtx: Context, runId: string, slot: DpsSlot): void {
     agentCtx.on('tools/pre-execute', async (exec, next) => {
       if (exec.name !== 'write' && exec.name !== 'edit' && exec.name !== 'bash') return next()
-      const run = this.service.getRun(runId)
-      const task = Object.values(run.tasks).find((candidate) =>
-        candidate.ownerSlot === slot && candidate.status === 'running' && candidate.activeLease,
-      )
-      if (!task) {
+      const guard = this.service.getExecutionGuardView(runId, slot)
+      if (!guard) {
         return {
           kind: 'deny',
           reason: 'No active dungeon task lease. Call work_claim for your assigned task before write/edit/bash.',
@@ -763,11 +817,11 @@ export class PartyAgentManager {
       if (exec.name === 'write' || exec.name === 'edit') {
         const suppliedPath = args.file_path ?? args.path
         if (typeof suppliedPath !== 'string') return { kind: 'deny', reason: 'File mutation requires a concrete file path.' }
-        const root = resolve(run.workspaceRoot)
+        const root = resolve(guard.workspaceRoot)
         const absolutePath = resolve(root, suppliedPath)
         const workspacePath = relative(root, absolutePath).replaceAll('\\', '/')
         const allowed = workspacePath && !workspacePath.startsWith('../') &&
-          task.workOrder.writeScopes.some((scope) => workspacePath === scope || matchesGlob(workspacePath, scope))
+          guard.writeScopes.some((scope) => workspacePath === scope || matchesGlob(workspacePath, scope))
         if (!allowed) return { kind: 'deny', reason: `Path ${suppliedPath} is outside the active task writeScopes.` }
       } else {
         const command = typeof args.command === 'string' ? args.command.trim().replace(/\s+/g, ' ') : ''
@@ -785,7 +839,7 @@ export class PartyAgentManager {
         const isGlobal = /^(?:npm|pnpm|yarn|bun)\s+(?:install|add|remove|uninstall|update|upgrade)\b/i.test(command) ||
           /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:format|fmt|codegen|generate|migrate)\b/i.test(command) ||
           /\b(?:prisma|drizzle|typeorm)\s+(?:generate|migrate)\b/i.test(command)
-        const owned = (task.workOrder.globalCommands ?? []).some((item) => item.trim().replace(/\s+/g, ' ') === command)
+        const owned = guard.globalCommands.some((item) => item.trim().replace(/\s+/g, ' ') === command)
         if (isGlobal && !owned) return { kind: 'deny', reason: `Workspace-global command ${command} is not owned by the active task.` }
       }
       return next()

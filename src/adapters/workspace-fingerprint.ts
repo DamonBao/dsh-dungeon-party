@@ -127,9 +127,11 @@ function resolveGitHeadCommit(workspaceRoot: string): string | undefined {
   }
 }
 
-/** Compute a deterministic digest without following workspace symlinks. */
-export function computeWorkspaceFingerprint(workspaceRoot: string, ignoreScopes: string[] = []): string {
-  const snapshot = createWorkspaceSnapshot(workspaceRoot, ignoreScopes)
+/** Compute a deterministic digest from an already captured snapshot. */
+export function computeWorkspaceFingerprintFromSnapshot(
+  workspaceRoot: string,
+  snapshot: WorkspaceSnapshot,
+): string {
   const digest = createHash('sha256')
   for (const path of Object.keys(snapshot).sort()) {
     digest.update(path)
@@ -148,4 +150,12 @@ export function computeWorkspaceFingerprint(workspaceRoot: string, ignoreScopes:
     digest.update('\0')
   }
   return `sha256:${digest.digest('hex')}`
+}
+
+/** Compute a deterministic digest without following workspace symlinks. */
+export function computeWorkspaceFingerprint(workspaceRoot: string, ignoreScopes: string[] = []): string {
+  return computeWorkspaceFingerprintFromSnapshot(
+    workspaceRoot,
+    createWorkspaceSnapshot(workspaceRoot, ignoreScopes),
+  )
 }

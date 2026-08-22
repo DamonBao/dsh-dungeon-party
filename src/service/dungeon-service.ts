@@ -334,9 +334,17 @@ export interface DungeonEvent<T = unknown> {
   payload: T
 }
 
+export interface ExecutionGuardView {
+  workspaceRoot: string
+  taskId: string
+  writeScopes: string[]
+  globalCommands: string[]
+}
+
 export interface DungeonEventStore {
   append(event: DungeonEvent): void
   load(runId: string): DungeonEvent[]
+  loadAfter?(runId: string, afterSequence: number): DungeonEvent[]
   publishProjection?(run: DungeonRun): void
   listRunIds?(): string[]
 }
@@ -434,7 +442,7 @@ export const defaultDungeonConfig: Readonly<DungeonConfig> = {
   healerVerificationCommands: ['npm test', 'npm run typecheck', 'npx tsc --noEmit', 'git status --short', 'git diff --stat', 'git diff --numstat'],
   healerVerificationTimeoutMs: 120_000,
   fingerprintIgnoreScopes: [
-    '.git/**', 'node_modules/**', 'lib/**', 'dist/**', 'coverage/**', '.dsh/dungeon-party/tmp/**',
+    '.git/**', 'node_modules/**', '.npm-cache/**', 'lib/**', 'dist/**', 'coverage/**', '.dsh/dungeon-party/tmp/**',
   ],
   validationRequired: true,
 }
@@ -1719,13 +1727,13 @@ export class DungeonService {
     return clone(report)
   }
 
-  finishRun(
+  async finishRun(
     actor: Actor,
     runId: string,
     resultSummary: string,
     workspaceFingerprint: string,
-    recomputeFingerprint?: () => string,
-  ): DungeonRun {
+    recomputeFingerprint?: () => string | Promise<string>,
+  ): Promise<DungeonRun> {
     const run = this.requireTank(actor, runId)
     assert(run.phase === 'VALIDATING', 'INVALID_PHASE', 'Only a validating run can be completed')
     assert(run.controlState === 'normal', 'RUN_NOT_READY', 'Run control state must be normal')
@@ -1776,7 +1784,7 @@ export class DungeonService {
     // workspace is unchanged; otherwise fail safely and keep the run
     // validating against a now-stale acceptance report.
     if (recomputeFingerprint) {
-      const actualFingerprint = recomputeFingerprint()
+      const actualFingerprint = await recomputeFingerprint()
       if (actualFingerprint !== workspaceFingerprint) {
         this.append(prepared, 'dungeon/run-completion-aborted', {
           expectedFingerprint: workspaceFingerprint,
@@ -1804,7 +1812,8 @@ export class DungeonService {
     this.getRunForActor(actor, runId)
     assert(Number.isInteger(afterSequence) && afterSequence >= 0, 'INVALID_CURSOR', 'afterSequence must be a non-negative integer')
     assert(Number.isInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 120_000, 'INVALID_TIMEOUT', 'timeoutMs must be between 1 and 120000')
-    const newerEvents = () => this.eventStore.load(runId).filter((event) => event.sequence > afterSequence)
+    const newerEvents = () => this.eventStore.loadAfter?.(runId, afterSequence) ??
+      this.eventStore.load(runId).filter((event) => event.sequence > afterSequence)
     const immediate = newerEvents()
     if (immediate.length > 0) {
       return { run: this.getRunForActor(actor, runId), events: immediate, timedOut: false }
@@ -1889,14 +1898,42 @@ export class DungeonService {
     return [...this.runs.keys()]
   }
 
+  /** Enumerate only mutable runs without cloning historical terminal state. */
+  listActiveRunIds(): string[] {
+    const active: string[] = []
+    for (const [runId, run] of this.runs) {
+      if (!terminalPhases.includes(run.phase)) active.push(runId)
+    }
+    return active
+  }
+
   getRun(runId: string): DungeonRun {
     return clone(this.requireRun(runId))
   }
 
-  getRunForActor(actor: Actor, runId: string): DungeonRun {
+  /** Return the minimal immutable data needed by the high-frequency tool guard. */
+  getExecutionGuardView(runId: string, slot: DpsSlot): ExecutionGuardView | undefined {
+    const run = this.requireRun(runId)
+    const task = Object.values(run.tasks).find((candidate) =>
+      candidate.ownerSlot === slot && candidate.status === 'running' && candidate.activeLease,
+    )
+    if (!task) return undefined
+    return {
+      workspaceRoot: run.workspaceRoot,
+      taskId: task.workOrder.id,
+      writeScopes: [...task.workOrder.writeScopes],
+      globalCommands: [...(task.workOrder.globalCommands ?? [])],
+    }
+  }
+
+  assertRunAccess(actor: Actor, runId: string): void {
     const run = this.requireRun(runId)
     assert(this.findSlot(run, actor.sessionId), 'FORBIDDEN', 'Only current party members can inspect the run')
-    return clone(run)
+  }
+
+  getRunForActor(actor: Actor, runId: string): DungeonRun {
+    this.assertRunAccess(actor, runId)
+    return clone(this.requireRun(runId))
   }
 
   private append(run: DungeonRun, type: string, payload: unknown, actorSessionId?: string): DungeonRun {
@@ -1916,7 +1953,10 @@ export class DungeonService {
     const updated = this.reduce(this.runs.get(run.id), canonicalEvent)
     this.runs.set(run.id, updated)
     this.sequenceCounters.set(run.id, nextSequence + 1)
-    this.eventStore.publishProjection?.(clone(updated))
+    // The event store owns projection compaction and Session.append snapshots
+    // accepted JSON. Passing the live read-only value avoids deep-cloning the
+    // whole run for the calls that the store will compact away.
+    this.eventStore.publishProjection?.(updated)
     for (const notify of [...(this.waiters.get(run.id) ?? [])]) notify()
     return updated
   }

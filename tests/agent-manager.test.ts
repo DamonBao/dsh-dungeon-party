@@ -457,14 +457,14 @@ describe('PartyAgentManager', () => {
       service.assignTask(tank, 'run', 'task', 'dps-1')
       const dps = { sessionId: 'run-dps-1-g1' }
       const lease = service.claimTask(dps, 'run', 'task')
-      manager.beginLeaseAudit(dps, 'run', 'task', lease.leaseId)
+      await manager.beginLeaseAudit(dps, 'run', 'task', lease.leaseId)
       writeFileSync(join(root, 'README.md'), 'escaped\n')
 
-      expect(() => manager.auditWorkspaceBeforeSubmit(dps, 'run', {
+      await expect(manager.auditWorkspaceBeforeSubmit(dps, 'run', {
         taskId: 'task', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
         slot: 'dps-1', generation: 1, status: 'completed', summary: 'done', changedFiles: [],
         evidence: ['done'], commandsRun: [], risks: [], remainingWork: [],
-      })).toThrowError(expect.objectContaining({ code: 'ACTUAL_WRITE_SCOPE_VIOLATION' }))
+      })).rejects.toThrowError(expect.objectContaining({ code: 'ACTUAL_WRITE_SCOPE_VIOLATION' }))
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -490,7 +490,7 @@ describe('PartyAgentManager', () => {
       service.assignTask(tank, 'run', 'task', 'dps-1')
       const dps = { sessionId: 'run-dps-1-g1' }
       const lease = service.claimTask(dps, 'run', 'task')
-      manager.beginLeaseAudit(dps, 'run', 'task', lease.leaseId)
+      await manager.beginLeaseAudit(dps, 'run', 'task', lease.leaseId)
 
       // External noise (e.g. another process) lands after the claim baseline.
       writeFileSync(join(root, 'README.md'), 'escaped\n')
@@ -499,8 +499,8 @@ describe('PartyAgentManager', () => {
         slot: 'dps-1' as const, generation: 1, status: 'completed' as const, summary: 'done',
         changedFiles: [], evidence: ['done'], commandsRun: [], risks: [], remainingWork: [],
       })
-      expect(() => manager.auditWorkspaceBeforeSubmit(dps, 'run', report(1)))
-        .toThrowError(expect.objectContaining({ code: 'ACTUAL_WRITE_SCOPE_VIOLATION' }))
+      await expect(manager.auditWorkspaceBeforeSubmit(dps, 'run', report(1)))
+        .rejects.toThrowError(expect.objectContaining({ code: 'ACTUAL_WRITE_SCOPE_VIOLATION' }))
 
       // The DPS submits a checkpoint: the lease renews and the audit baseline
       // must reset so historical noise no longer blocks the submit.
@@ -510,8 +510,8 @@ describe('PartyAgentManager', () => {
         completed: ['step'], nextSteps: ['next'], evidenceDelta: ['progress'], blockers: [],
         workspaceFingerprint: 'v1',
       })
-      manager.refreshLeaseAudit('run', 'task')
-      expect(() => manager.auditWorkspaceBeforeSubmit(dps, 'run', report(2))).not.toThrow()
+      await manager.refreshLeaseAudit('run', 'task')
+      await expect(manager.auditWorkspaceBeforeSubmit(dps, 'run', report(2))).resolves.toBeUndefined()
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

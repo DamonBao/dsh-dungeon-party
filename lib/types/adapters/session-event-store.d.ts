@@ -11,14 +11,16 @@ export declare class SessionDungeonEventStore implements DungeonEventStore {
     private readonly runSessions;
     /** Per-run event index so load() stops rescanning/cloning the whole log. */
     private readonly eventCache;
+    private readonly eventIndexes;
     private readonly cacheSessions;
-    private projectionCounter;
+    private readonly projectionCounters;
     private readonly lastProjectedPhase;
     private static readonly PROJECTION_INTERVAL;
     constructor(sessions: SessionStore);
     append(event: DungeonEvent): void;
     publishProjection(run: DungeonRun): void;
     listRunIds(): string[];
+    loadAfter(runId: string, afterSequence: number): DungeonEvent[];
     load(runId: string): DungeonEvent[];
     private resolveSession;
 }

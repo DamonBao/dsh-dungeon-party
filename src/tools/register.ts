@@ -1,10 +1,32 @@
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool, type JsonValue, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import {
+  defineTool,
+  type InferArgs,
+  type ParameterSchemaSpec,
+  type ToolDefinition,
+  type ToolRunContext,
+} from '@deepseek-ai/dsh-tools'
 
 import type { PartyAgentManager } from '../adapters/party-agent-manager.js'
-import { computeWorkspaceFingerprint } from '../adapters/workspace-fingerprint.js'
+import {
+  assignmentOutput,
+  battleResActionOutput,
+  battleResRequestOutput,
+  checkpointRequestOutput,
+  healthOutput,
+  partyMessageOutput,
+  recoveryInstructionOutput,
+  runSummaryOutput,
+  taskLeaseOutput,
+  taskRecordOutput,
+  validationManifestOutput,
+  validationReportOutput,
+  verificationOutput,
+  waitOutput,
+} from './output-schemas.js'
+import { workspaceComputationQueue } from '../adapters/workspace-computation-queue.js'
 import {
   DungeonError,
   type DpsCheckpoint,
@@ -26,8 +48,8 @@ function actor(exec: ToolRunContext): { sessionId: string } {
   return { sessionId: String(exec.agent.id) }
 }
 
-function json<T>(value: T): JsonValue {
-  return JSON.parse(JSON.stringify(value)) as JsonValue
+function canonical<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
 }
 
 /**
@@ -290,11 +312,50 @@ function currentTurnId(exec: ToolRunContext): string | undefined {
   return `turn-${turn.data.turn}`
 }
 
-const output = {
-  schema: { type: 'json' } as const,
-  render: (_args: unknown, value: JsonValue) => [
-    { type: 'text' as const, text: JSON.stringify(value, null, 2) },
-  ],
+const toolOutputs = {
+  party_start: runSummaryOutput,
+  party_status: runSummaryOutput,
+  party_wait: waitOutput,
+  party_phase: runSummaryOutput,
+  party_health: healthOutput,
+  party_assign: assignmentOutput,
+  party_reopen: taskRecordOutput,
+  party_direct_recovery: recoveryInstructionOutput,
+  party_request_checkpoint: checkpointRequestOutput,
+  party_interrupt: taskRecordOutput,
+  party_review_quarantine: taskRecordOutput,
+  party_reassign: taskRecordOutput,
+  party_recover: runSummaryOutput,
+  party_resume_dispatch: runSummaryOutput,
+  request_battle_res: battleResRequestOutput,
+  work_claim: taskLeaseOutput,
+  work_submit: taskRecordOutput,
+  verification_run: verificationOutput,
+  member_checkpoint: taskRecordOutput,
+  party_message: partyMessageOutput,
+  member_self_maintain: recoveryInstructionOutput,
+  validation_manifest: validationManifestOutput,
+  validation_submit: validationReportOutput,
+  battle_res: battleResActionOutput,
+  party_finish: runSummaryOutput,
+  party_cancel: runSummaryOutput,
+} as const
+
+type DungeonToolName = keyof typeof toolOutputs
+
+function defineDungeonTool<
+  const Name extends DungeonToolName,
+  const Parameters extends ParameterSchemaSpec,
+>(options: {
+  name: Name
+  description: string
+  parameters: Parameters
+  execute(args: InferArgs<Parameters>, exec: ToolRunContext): Promise<unknown>
+}): ToolDefinition {
+  return defineTool({
+    ...options,
+    output: toolOutputs[options.name],
+  } as never) as ToolDefinition
 }
 
 const DEFAULT_VERIFICATION_COMMANDS = ['npm test', 'npm run typecheck', 'npx tsc --noEmit', 'git status --short', 'git diff --stat', 'git diff --numstat']
@@ -308,6 +369,13 @@ function verificationCommands(service: DungeonService): string[] {
 function verificationTimeout(service: DungeonService): number {
   const getter = (service as DungeonService & { getHealerVerificationTimeoutMs?: () => number }).getHealerVerificationTimeoutMs
   return getter ? getter.call(service) : DEFAULT_VERIFICATION_TIMEOUT_MS
+}
+
+function appendBoundedOutput(current: string, chunk: Buffer, limit = 16_000): string {
+  const combined = current + chunk.toString()
+  if (combined.length <= limit) return combined
+  const headLimit = Math.floor(limit * 0.6)
+  return combined.slice(0, headLimit) + combined.slice(-(limit - headLimit))
 }
 
 function excerpt(head: string, tail: string, limit = 4000): string {
@@ -326,8 +394,8 @@ async function runVerification(command: string, timeoutMs: number, cwd: string):
     let stderr = ''
     let timedOut = false
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM') }, timeoutMs)
-    child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
-    child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
+    child.stdout?.on('data', (chunk: Buffer) => { stdout = appendBoundedOutput(stdout, chunk) })
+    child.stderr?.on('data', (chunk: Buffer) => { stderr = appendBoundedOutput(stderr, chunk) })
     child.on('close', (code) => { clearTimeout(timer); resolve({ ...(code === null ? {} : { exitCode: code }), outputExcerpt: excerpt(stdout, stderr), durationMs: Date.now() - started, timedOut }) })
     child.on('error', () => { clearTimeout(timer); resolve({ outputExcerpt: excerpt(stdout, stderr), durationMs: Date.now() - started, timedOut }) })
   })
@@ -340,7 +408,7 @@ export function registerDungeonTools(
 ): () => void {
   let validationCounter = 0
   const disposers = [
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_start',
       description: 'Create a dungeon-party run and bind the calling agent as tank.',
       parameters: {
@@ -348,14 +416,13 @@ export function registerDungeonTools(
         objective: { type: 'string', required: true },
         workspaceRoot: { type: 'string', required: true },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
-        const workspaceFingerprint = computeWorkspaceFingerprint(
+        const workspaceFingerprint = await workspaceComputationQueue.fingerprint(
           args.workspaceRoot,
           service.getFingerprintIgnoreScopes(),
         )
-        return json(summarizeRun(service.startRun({
+        return canonical(summarizeRun(service.startRun({
           ...(args.runId ? { runId: args.runId } : {}),
           objective: args.objective,
           workspaceRoot: args.workspaceRoot,
@@ -364,21 +431,19 @@ export function registerDungeonTools(
         })))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_status',
       description: 'Read the current dungeon-party run state as a current party member.',
       parameters: {
         runId: { type: 'string', required: true },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
-        service.getRunForActor(caller, args.runId)
-        service.sweepExpiredState(args.runId)
-        return json(summarizeRun(service.getRunForActor(caller, args.runId)))
+        service.assertRunAccess(caller, args.runId)
+        return canonical(summarizeRun(service.sweepExpiredState(args.runId)))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_wait',
       description: 'Wait for durable run events newer than an event sequence cursor.',
       parameters: {
@@ -386,15 +451,14 @@ export function registerDungeonTools(
         afterSequence: { type: 'number', required: true },
         timeoutMs: { type: 'number' },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
-        service.getRunForActor(caller, args.runId)
+        service.assertRunAccess(caller, args.runId)
         service.sweepExpiredState(args.runId)
         const result = await service.waitForChange(
           caller, args.runId, args.afterSequence, args.timeoutMs ?? 30_000, exec.signal,
         )
-        return json({
+        return canonical({
           run: summarizeRun(result.run),
           events: summarizeEvents(result.events),
           omittedEventCount: Math.max(0, result.events.length - 24),
@@ -402,7 +466,7 @@ export function registerDungeonTools(
         })
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_phase',
       description: 'As tank, move the run through FORMING→PLANNING (create all work orders)→EXECUTING (then assign DPS)→VALIDATING; entering execution activates the healer first.',
       parameters: {
@@ -413,36 +477,33 @@ export function registerDungeonTools(
           required: true,
         },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         const phase = args.phase as RunPhase
         if (phase === 'VALIDATING') {
           const run = service.changePhase(caller, args.runId, phase)
           await agentManager?.prepareForPhase(caller, args.runId, phase)
-          return json(summarizeRun(run))
+          return canonical(summarizeRun(run))
         }
         await agentManager?.prepareForPhase(caller, args.runId, phase)
         service.changePhase(caller, args.runId, phase)
         if (phase === 'EXECUTING' || phase === 'REPAIR') {
           await agentManager?.dispatchAvailableTasks?.(caller, args.runId)
         }
-        return json(summarizeRun(service.getRunForActor(caller, args.runId)))
+        return canonical(summarizeRun(service.getRunForActor(caller, args.runId)))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_health',
       description: 'Read auditable readiness, progress, commander load, checkpoint, and recovery state.',
       parameters: {
         runId: { type: 'string', required: true },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
-        service.getRunForActor(caller, args.runId)
-        service.sweepExpiredState(args.runId)
-        const run = service.getRunForActor(caller, args.runId)
-        return json({
+        service.assertRunAccess(caller, args.runId)
+        const run = service.sweepExpiredState(args.runId)
+        return canonical({
           controlState: run.controlState,
           commanderLoad: run.commanderLoad,
           commanderCheckpoint: run.commanderCheckpoint,
@@ -450,17 +511,18 @@ export function registerDungeonTools(
           healthSignals: run.healthSignals.slice(-16).map((signal) => ({
             id: signal.id, slot: signal.slot, kind: signal.kind, severity: signal.severity, observedAt: signal.observedAt,
           })),
-          taskProgress: Object.fromEntries(Object.entries(run.tasks).slice(0, 100).map(([id, task]) => [id, {
+          taskProgress: Object.entries(run.tasks).slice(0, 100).map(([taskId, task]) => ({
+            taskId,
             progressState: task.progressState,
             missedCheckpoints: task.missedCheckpoints,
             nextCheckpointDueAt: task.nextCheckpointDueAt,
-          }])),
+          })),
           battleResChargesRemaining: run.battleResChargesRemaining,
           commanderBattleResChargesRemaining: run.commanderBattleResChargesRemaining,
         })
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_assign',
       description: 'As tank, create a work order draft (runId/version/list defaults are host-normalized) or assign after party_phase enters EXECUTING/REPAIRING.',
       parameters: {
@@ -508,7 +570,6 @@ export function registerDungeonTools(
         taskId: { type: 'string' },
         slot: { type: 'string', enum: ['dps-1', 'dps-2', 'dps-3'] },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         if (args.action === 'create') {
@@ -518,7 +579,7 @@ export function registerDungeonTools(
           const run = service.getRunForActor(caller, args.runId)
           let ordinal = run.taskSetVersion + 1
           while (run.tasks[`task-${ordinal}`]) ordinal += 1
-          return json(service.createTask(
+          return canonical(service.createTask(
             caller,
             args.runId,
             normalizeWorkOrderDraft(args.workOrder as Record<string, unknown>, args.runId, `task-${ordinal}`),
@@ -527,7 +588,7 @@ export function registerDungeonTools(
         if (!args.taskId || !args.slot) throw new DungeonError('INVALID_ARGS', 'taskId and slot are required for assign')
         const run = service.getRunForActor(caller, args.runId)
         if (run.phase !== 'EXECUTING' && run.phase !== 'REPAIR') {
-          return json({
+          return canonical({
             ok: false,
             code: 'INVALID_PHASE',
             message: `Assignment is not available during ${run.phase}. Finish creating work orders, then enter EXECUTING.`,
@@ -539,10 +600,10 @@ export function registerDungeonTools(
         await agentManager?.ensureMember(caller, args.runId, args.slot as DpsSlot)
         const assigned = service.assignTask(caller, args.runId, args.taskId, args.slot as DpsSlot)
         agentManager?.dispatchTask(caller, args.runId, args.taskId)
-        return json(assigned)
+        return canonical(assigned)
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_reopen',
       description: 'As tank, reopen a failed finding owner task for a versioned repair cycle.',
       parameters: {
@@ -550,45 +611,40 @@ export function registerDungeonTools(
         taskId: { type: 'string', required: true },
         findingIds: { type: 'array', items: { type: 'string' }, required: true },
       },
-      output,
       async execute(args, exec) {
-        return json(service.reopenTask(actor(exec), args.runId, args.taskId, args.findingIds))
+        return canonical(service.reopenTask(actor(exec), args.runId, args.taskId, args.findingIds))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_direct_recovery',
       description: 'As tank, issue validator-maintenance to a degraded but responsive healer.',
       parameters: {
         runId: { type: 'string', required: true },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         if (agentManager) {
-          await agentManager.executeValidatorMaintenance(caller, args.runId)
-          return json(service.getRunForActor(caller, args.runId).recoveryInstructions.at(-1))
+          return canonical(await agentManager.executeValidatorMaintenance(caller, args.runId))
         }
-        return json(service.directValidatorMaintenance(caller, args.runId))
+        return canonical(service.directValidatorMaintenance(caller, args.runId))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_request_checkpoint',
       description: 'As tank, request an immediate lease-bound checkpoint from a running DPS task.',
       parameters: {
         runId: { type: 'string', required: true },
         taskId: { type: 'string', required: true },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         if (agentManager) {
-          agentManager.requestCheckpoint(caller, args.runId, args.taskId)
-          return json(service.getRunForActor(caller, args.runId).checkpointRequests.at(-1))
+          return canonical(agentManager.requestCheckpoint(caller, args.runId, args.taskId))
         }
-        return json(service.requestTaskCheckpoint(caller, args.runId, args.taskId))
+        return canonical(service.requestTaskCheckpoint(caller, args.runId, args.taskId))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_interrupt',
       description: 'As tank, request interruption of the exact active Turn for a confirmed stalled task.',
       parameters: {
@@ -596,29 +652,26 @@ export function registerDungeonTools(
         taskId: { type: 'string', required: true },
         turnId: { type: 'string', required: true },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         if (!agentManager) {
-          return json(service.requestTaskInterrupt(caller, args.runId, args.taskId, args.turnId))
+          return canonical(service.requestTaskInterrupt(caller, args.runId, args.taskId, args.turnId))
         }
-        await agentManager.interruptTask(caller, args.runId, args.taskId, args.turnId)
-        return json(service.getRunForActor(caller, args.runId).tasks[args.taskId])
+        return canonical(await agentManager.interruptTask(caller, args.runId, args.taskId, args.turnId))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_review_quarantine',
       description: 'As tank, confirm review of workspace files quarantined after a Turn interruption.',
       parameters: {
         runId: { type: 'string', required: true },
         taskId: { type: 'string', required: true },
       },
-      output,
       async execute(args, exec) {
-        return json(service.reviewQuarantinedChanges(actor(exec), args.runId, args.taskId))
+        return canonical(service.reviewQuarantinedChanges(actor(exec), args.runId, args.taskId))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_reassign',
       description: 'As tank, reassign a safely interrupted task after lease revocation and quarantine review.',
       parameters: {
@@ -626,17 +679,16 @@ export function registerDungeonTools(
         taskId: { type: 'string', required: true },
         slot: { type: 'string', enum: ['dps-1', 'dps-2', 'dps-3'], required: true },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         const slot = args.slot as DpsSlot
         await agentManager?.ensureMember(caller, args.runId, slot)
         const task = service.reassignTask(caller, args.runId, args.taskId, slot)
         agentManager?.dispatchTask(caller, args.runId, args.taskId)
-        return json(task)
+        return canonical(task)
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_recover',
       description: 'As the original Commander after a network stop, continue the existing dungeon or restart it as a fresh run. The host generates the new run id when restarting.',
       parameters: {
@@ -644,14 +696,13 @@ export function registerDungeonTools(
         action: { type: 'string', enum: ['continue', 'restart'], required: true },
         newRunId: { type: 'string', description: 'Optional explicit id for restart; normally omit it.' },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         if (args.action === 'continue') {
           const run = service.recoverRunAfterCommanderReturn(caller, args.runId)
           await agentManager?.restoreBoundParty(caller, args.runId)
           await agentManager?.kickScheduler(args.runId)
-          return json(summarizeRun(run))
+          return canonical(summarizeRun(run))
         }
         const previous = service.getRunForActor(caller, args.runId)
         if (!['COMPLETED', 'FAILED', 'CANCELLED'].includes(previous.phase)) {
@@ -659,8 +710,8 @@ export function registerDungeonTools(
         }
         await agentManager?.disposeRun(args.runId)
         const newRunId = args.newRunId?.trim() || `run-${randomUUID()}`
-        const workspaceFingerprint = computeWorkspaceFingerprint(previous.workspaceRoot, service.getFingerprintIgnoreScopes())
-        return json(summarizeRun(service.startRun({
+        const workspaceFingerprint = await workspaceComputationQueue.fingerprint(previous.workspaceRoot, service.getFingerprintIgnoreScopes())
+        return canonical(summarizeRun(service.startRun({
           runId: newRunId,
           objective: previous.objective,
           workspaceRoot: previous.workspaceRoot,
@@ -669,18 +720,17 @@ export function registerDungeonTools(
         })))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_resume_dispatch',
       description: 'As the recovered tank, resume dispatch after reviewing the commander checkpoint.',
       parameters: {
         runId: { type: 'string', required: true },
       },
-      output,
       async execute(args, exec) {
-        return json(summarizeRun(service.resumeDispatch(actor(exec), args.runId)))
+        return canonical(summarizeRun(service.resumeDispatch(actor(exec), args.runId)))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'request_battle_res',
       description: 'As tank, reserve battle resurrection only when party_health reports the DPS lifeState=down; use checkpoint/interrupt for an alive stalled DPS.',
       parameters: {
@@ -688,13 +738,12 @@ export function registerDungeonTools(
         slot: { type: 'string', enum: ['dps-1', 'dps-2', 'dps-3'], required: true },
         resurrectionId: { type: 'string' },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         const run = service.getRunForActor(caller, args.runId)
         const currentLifeState = run.slots[args.slot as DpsSlot].lifeState
         if (currentLifeState !== 'down') {
-          return json({
+          return canonical({
             ok: false,
             code: 'MEMBER_NOT_DOWN',
             message: `Battle resurrection requires lifeState=down; ${args.slot} is currently ${currentLifeState}.`,
@@ -704,27 +753,27 @@ export function registerDungeonTools(
         }
         const request = service.requestBattleRes(caller, args.runId, args.slot as DpsSlot, args.resurrectionId)
         agentManager?.dispatchBattleRes(caller, args.runId, request.resurrectionId)
-        return json(request)
+        return canonical(request)
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'work_claim',
       description: 'Claim a task assigned to the calling DPS and receive its versioned lease.',
       parameters: {
         runId: { type: 'string', required: true },
         taskId: { type: 'string', required: true },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
-        const lease = service.claimTask(caller, args.runId, args.taskId)
-        agentManager?.beginLeaseAudit(caller, args.runId, args.taskId, lease.leaseId)
+        const lease = agentManager
+          ? await agentManager.claimTaskWithAudit(caller, args.runId, args.taskId)
+          : service.claimTask(caller, args.runId, args.taskId)
         const turnId = currentTurnId(exec)
         if (turnId) service.registerTaskTurn(args.runId, args.taskId, turnId)
-        return json(lease)
+        return canonical(lease)
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'work_submit',
       description: 'Submit business results for the calling DPS current lease; host derives technical lease and generation fields.',
       parameters: {
@@ -748,7 +797,6 @@ export function registerDungeonTools(
           },
         },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         const report = normalizeExecutionReport(
@@ -756,14 +804,14 @@ export function registerDungeonTools(
         )
         const turnId = currentTurnId(exec)
         if (turnId) service.registerTaskTurn(args.runId, report.taskId, turnId)
-        agentManager?.auditWorkspaceBeforeSubmit(caller, args.runId, report)
-        const task = service.submitExecution(caller, args.runId, report)
-        agentManager?.completeLeaseAudit(args.runId, report.taskId)
+        const task = agentManager
+          ? await agentManager.submitExecutionWithAudit(caller, args.runId, report)
+          : service.submitExecution(caller, args.runId, report)
         await agentManager?.kickScheduler(args.runId)
-        return json(task)
+        return canonical(task)
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'verification_run',
       description: 'Healer-only: execute one allowlisted workspace verification command and persist its bounded result.',
       parameters: {
@@ -771,7 +819,6 @@ export function registerDungeonTools(
         command: { type: 'string', required: true },
         timeoutMs: { type: 'number' },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         const run = service.getRunForActor(caller, args.runId)
@@ -782,15 +829,15 @@ export function registerDungeonTools(
         const requested = args.timeoutMs ?? limit
         if (!Number.isInteger(requested) || requested < 1 || requested > limit) throw new DungeonError('INVALID_ARGS', `timeoutMs must be a positive integer <= ${limit}`)
         const result = await runVerification(args.command, requested, run.workspaceRoot)
-        if (result.timedOut) return json({ code: 'VERIFICATION_TIMEOUT', command: args.command, durationMs: result.durationMs, outputExcerpt: result.outputExcerpt })
+        if (result.timedOut) return canonical({ code: 'VERIFICATION_TIMEOUT', command: args.command, durationMs: result.durationMs, outputExcerpt: result.outputExcerpt })
         const recorded = service.recordVerificationCommand(caller, args.runId, {
           command: args.command, ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }), durationMs: result.durationMs,
           outputExcerpt: result.outputExcerpt, beganAt: new Date(Date.now() - result.durationMs).toISOString(),
         })
-        return json(recorded)
+        return canonical(recorded)
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'member_checkpoint',
       description: 'As the owning DPS, submit a lease-bound progress checkpoint with evidence delta. Technical fields (lease identity, slot, versions, fingerprint) are host-derived from your active lease; you only provide taskId and the semantic lists.',
       parameters: {
@@ -801,7 +848,6 @@ export function registerDungeonTools(
         evidenceDelta: { type: 'array', items: { type: 'string' }, description: 'New evidence observed since the last checkpoint.' },
         blockers: { type: 'array', items: { type: 'string' } },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         const run = service.getRunForActor(caller, args.runId)
@@ -828,11 +874,11 @@ export function registerDungeonTools(
         const turnId = currentTurnId(exec)
         if (turnId) service.registerTaskTurn(args.runId, args.taskId, turnId)
         const submitted = service.submitCheckpoint(caller, args.runId, checkpoint)
-        agentManager?.refreshLeaseAudit(args.runId, args.taskId)
-        return json(submitted)
+        await agentManager?.refreshLeaseAudit(args.runId, args.taskId)
+        return canonical(submitted)
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_message',
       description: 'Send an auditable structured message to a currently bound party slot.',
       parameters: {
@@ -850,18 +896,16 @@ export function registerDungeonTools(
           },
         },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         const message = normalizePartyMessage(args.message as unknown as Record<string, unknown>)
         if (agentManager) {
-          agentManager.sendPartyMessage(caller, args.runId, args.toSlot as PartySlot, message)
-          return json(service.getRunForActor(caller, args.runId).messages.at(-1))
+          return canonical(agentManager.sendPartyMessage(caller, args.runId, args.toSlot as PartySlot, message))
         }
-        return json(service.sendPartyMessage(caller, args.runId, args.toSlot as PartySlot, message))
+        return canonical(service.sendPartyMessage(caller, args.runId, args.toSlot as PartySlot, message))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'member_self_maintain',
       description: 'As healer, complete a tank-directed validator-maintenance instruction in the same Session.',
       parameters: {
@@ -869,26 +913,24 @@ export function registerDungeonTools(
         instructionId: { type: 'string', required: true },
         success: { type: 'boolean', required: true },
       },
-      output,
       async execute(args, exec) {
-        return json(service.completeValidatorMaintenance(actor(exec), args.runId, args.instructionId, args.success))
+        return canonical(service.completeValidatorMaintenance(actor(exec), args.runId, args.instructionId, args.success))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'validation_manifest',
       description: 'As tank create, or as healer retrieve, the immutable manifest for the current workspace.',
       parameters: {
         runId: { type: 'string', required: true },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         const run = service.getRunForActor(caller, args.runId)
-        const fingerprint = computeWorkspaceFingerprint(run.workspaceRoot, service.getFingerprintIgnoreScopes())
-        return json(service.createValidationManifest(caller, args.runId, fingerprint))
+        const fingerprint = await workspaceComputationQueue.fingerprint(run.workspaceRoot, service.getFingerprintIgnoreScopes())
+        return canonical(service.createValidationManifest(caller, args.runId, fingerprint))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'validation_submit',
       description: 'As the bound healer, submit a structured report for the current validation manifest. Manifest version, task-set version, and workspace fingerprint are host-derived from the current manifest; provide only the verdict, per-criterion checks, findings, and summary.',
       parameters: {
@@ -923,7 +965,6 @@ export function registerDungeonTools(
         },
         validationId: { type: 'string', description: 'Optional idempotency label; host generates one when omitted.' },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         const run = service.getRunForActor(caller, args.runId)
@@ -953,10 +994,10 @@ export function registerDungeonTools(
           })),
           summary: args.summary,
         }
-        return json(service.submitValidation(caller, args.runId, submission))
+        return canonical(service.submitValidation(caller, args.runId, submission))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'battle_res',
       description: 'As healer, consume or settle an authorized DPS resurrection or emergency commander ticket.',
       parameters: {
@@ -969,89 +1010,81 @@ export function registerDungeonTools(
         resurrectionId: { type: 'string' },
         ticketId: { type: 'string' },
         mode: { type: 'string', enum: ['resume', 'replace'] },
-        outcome: { type: 'json' },
+        outcome: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            success: { type: 'boolean', required: true },
+            sessionId: { type: 'string', required: true },
+            mode: { type: 'string', enum: ['resume', 'replace'] },
+          },
+        },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         if (args.action === 'start-dps') {
           if (!args.resurrectionId) throw new DungeonError('INVALID_ARGS', 'resurrectionId is required')
-          return json(service.startBattleRes(caller, args.runId, args.resurrectionId))
+          return canonical(service.startBattleRes(caller, args.runId, args.resurrectionId))
         }
         if (args.action === 'complete-dps') {
           if (!args.resurrectionId) throw new DungeonError('INVALID_ARGS', 'resurrectionId is required')
-          const outcome = args.outcome as unknown as {
-            success: boolean
-            mode: 'resume' | 'replace'
-            sessionId: string
-          } | undefined
-          const mode = args.mode as 'resume' | 'replace' | undefined ?? outcome?.mode
+          const outcome = args.outcome
+          const mode = args.mode ?? outcome?.mode
           if (agentManager) {
             if (!mode) throw new DungeonError('INVALID_ARGS', 'mode is required')
-            await agentManager.completeDpsResurrection(caller, args.runId, args.resurrectionId, mode)
-            return json(service.getRunForActor(caller, args.runId).resurrectionRequests.find(
-              (request) => request.resurrectionId === args.resurrectionId,
-            ))
+            return canonical(await agentManager.completeDpsResurrection(caller, args.runId, args.resurrectionId, mode))
           }
-          if (!outcome) throw new DungeonError('INVALID_ARGS', 'outcome is required without an Agent manager')
-          return json(service.completeBattleRes(caller, args.runId, args.resurrectionId, outcome))
+          if (!outcome || !mode) throw new DungeonError('INVALID_ARGS', 'outcome and mode are required without an Agent manager')
+          return canonical(service.completeBattleRes(caller, args.runId, args.resurrectionId, { ...outcome, mode }))
         }
         if (args.action === 'consume-commander') {
           if (!args.ticketId) throw new DungeonError('INVALID_ARGS', 'ticketId is required')
-          return json(service.consumeCommanderRescueTicket(caller, args.runId, args.ticketId))
+          return canonical(service.consumeCommanderRescueTicket(caller, args.runId, args.ticketId))
         }
         if (!args.ticketId) throw new DungeonError('INVALID_ARGS', 'ticketId is required')
         if (agentManager) {
-          await agentManager.recoverCommander(caller, args.runId, args.ticketId)
-          return json(service.getRunForActor(caller, args.runId).commanderRescueTickets.find(
-            (ticket) => ticket.ticketId === args.ticketId,
-          ))
+          return canonical(await agentManager.recoverCommander(caller, args.runId, args.ticketId))
         }
         if (!args.outcome) throw new DungeonError('INVALID_ARGS', 'outcome is required without an Agent manager')
-        return json(service.completeCommanderResurrection(caller, args.runId, args.ticketId, args.outcome as unknown as {
-          success: boolean
-          sessionId: string
-        }))
+        return canonical(service.completeCommanderResurrection(caller, args.runId, args.ticketId, args.outcome))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_finish',
       description: 'As tank, complete a run only when every service-layer validation gate passes.',
       parameters: {
         runId: { type: 'string', required: true },
         resultSummary: { type: 'string', required: true },
       },
-      output,
       async execute(args, exec) {
         const caller = actor(exec)
         const current = service.getRunForActor(caller, args.runId)
-        const fingerprint = computeWorkspaceFingerprint(current.workspaceRoot, service.getFingerprintIgnoreScopes())
+        const fingerprint = await workspaceComputationQueue.fingerprint(current.workspaceRoot, service.getFingerprintIgnoreScopes())
         // Two-phase completion (PRD §14.1): the service re-derives the
         // workspace fingerprint between run-completion-prepared and
         // run-completed, so an external change during that window aborts the
         // completion instead of certifying a stale workspace.
-        const run = service.finishRun(
+        const run = await service.finishRun(
           caller,
           args.runId,
           args.resultSummary,
           fingerprint,
-          () => computeWorkspaceFingerprint(current.workspaceRoot, service.getFingerprintIgnoreScopes()),
+          () => workspaceComputationQueue.fingerprint(current.workspaceRoot, service.getFingerprintIgnoreScopes()),
         )
         await agentManager?.disposeRun(args.runId)
-        return json(summarizeRun(run))
+        return canonical(summarizeRun(run))
       },
     })),
-    ctx.tools.register(defineTool({
+    ctx.tools.register(defineDungeonTool({
       name: 'party_cancel',
       description: 'As tank, cancel a non-terminal run and stop all owned party child Agents.',
       parameters: {
         runId: { type: 'string', required: true },
       },
-      output,
       async execute(args, exec) {
         const run = service.changePhase(actor(exec), args.runId, 'CANCELLED')
         await agentManager?.disposeRun(args.runId)
-        return json(summarizeRun(run))
+        return canonical(summarizeRun(run))
       },
     })),
   ]
