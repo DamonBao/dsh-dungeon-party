@@ -231,6 +231,7 @@ DSH 已具备 Agent Teams、持久任务、消息通信和 continuable Agent 等
 - 在收到 T 的自我稳定指令后，在原 Session 内保存 checkpoint、压缩上下文并重启验收 attempt；
 - 在收到 T 的战复授权后，诊断故障 DPS 并执行恢复动作；
 - T 进入 `down/unavailable` 时，无需 T 授权，消费服务签发的紧急指挥战复票据直接恢复原 Lead Session。
+- 在验收阶段，仅可执行配置 `healerVerificationCommands` 白名单内的只读验证命令；每次执行都必须捕获结果并持久化完整转录，供验收报告引用。
 
 **禁止行为：**
 
@@ -523,13 +524,18 @@ interface ExecutionReport {
     exitCode?: number
     summary: string
   }>
+  modifiedAssertions: Array<{
+    file: string
+    test: string
+    reason: string
+  }>
   risks: string[]
   remainingWork: string[]
   workspaceFingerprint?: string
 }
 ```
 
-只有结构合法、`taskVersion` 一致，且 `leaseId`、`leaseVersion`、slot 与当前有效 lease 完全匹配的报告才可推进任务状态。
+只有结构合法、`taskVersion` 一致，且 `leaseId`、`leaseVersion`、slot 与当前有效 lease 完全匹配的报告才可推进任务状态。若 `changedFiles` 包含测试文件，`modifiedAssertions` 必须逐条披露受影响断言（`file`、`test`、`reason`）；缺失或为空时服务以 `MODIFIED_ASSERTIONS_REQUIRED` 拒绝报告。奶可据此独立枚举断言变化。
 
 ### 9.3 验收清单与报告
 
@@ -1281,6 +1287,7 @@ workspaceMode: shared | git-worktree
 - `member_checkpoint`：在恢复前保存当前验收或战复进度；
 - `member_self_maintain`：消费 T 下达的有效自我稳定指令并在原 Session 内恢复；
 - `battle_res`：消费 T 签发的 DPS 战复指令，或在 T down/unavailable 时直接消费服务签发的紧急指挥战复票据。
+- `verification_run`：仅绑定奶可调用，传入 `command`（字符串）及可选 `timeoutMs`（不得超过 `healerVerificationTimeoutMs`），在 `workspaceRoot` 以 `shell: false` 执行配置白名单中精确匹配的只读命令；返回 `{ command, exitCode, durationMs, outputExcerpt }`，并持久化 `dungeon/verification-command-run` 事件。非奶调用返回 `FORBIDDEN`，非白名单命令返回 `INVALID_COMMAND`，超时也结构化捕获并记录转录。
 
 ### 12.4 工具通用规则
 
@@ -1620,6 +1627,14 @@ maxMissedCheckpoints: 2
 taskLeaseDurationMs: 600000
 commanderMaxPendingDecisions: 6
 commanderDecisionSlaMs: 180000
+healerVerificationCommands:
+  - npm test
+  - npm run typecheck
+  - npx tsc --noEmit
+  - git status --short
+  - git diff --stat
+  - git diff --numstat
+healerVerificationTimeoutMs: 120000
 autoThrottleOnCommanderOverload: true
 largeChangeFileThreshold: 100
 fingerprintIgnoreScopes:

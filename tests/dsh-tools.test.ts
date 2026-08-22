@@ -80,6 +80,7 @@ describe('DSH dungeon tools', () => {
       'request_battle_res',
       'work_claim',
       'work_submit',
+      'verification_run',
       'member_checkpoint',
       'party_message',
       'member_self_maintain',
@@ -312,7 +313,7 @@ describe('DSH dungeon tools', () => {
     service.submitExecution({ sessionId: 'session-dps' }, 'run', {
       taskId: 'task', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
       slot: 'dps-1', generation: 1, status: 'completed', summary: 'done',
-      changedFiles: ['tests/dsh-tools.test.ts'], evidence: ['green'], commandsRun: [], risks: [], remainingWork: [],
+      changedFiles: ['tests/dsh-tools.test.ts'], modifiedAssertions: [{ file: 'tests/dsh-tools.test.ts', reason: 'Updated assertions for the changed test behavior.' }], evidence: ['green'], commandsRun: [], risks: [], remainingWork: [],
     })
     service.changePhase(tank, 'run', 'VALIDATING')
     const manifest = service.createValidationManifest(tank, 'run', 'v1')
@@ -503,7 +504,7 @@ describe('two-phase party_finish', () => {
     service.submitExecution({ sessionId: 'session-dps' }, 'run', {
       taskId: 'task', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
       slot: 'dps-1', generation: 1, status: 'completed', summary: 'done',
-      changedFiles: ['tests/dsh-tools.test.ts'], evidence: ['green'], commandsRun: [], risks: [], remainingWork: [],
+      changedFiles: ['tests/dsh-tools.test.ts'], modifiedAssertions: [{ file: 'tests/dsh-tools.test.ts', reason: 'Updated assertions for the changed test behavior.' }], evidence: ['green'], commandsRun: [], risks: [], remainingWork: [],
     })
     service.changePhase(tank, 'run', 'VALIDATING')
     await manifestTool.execute({ runId: 'run' }, execution('tank'))

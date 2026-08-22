@@ -28,7 +28,7 @@ const roleTools: Record<ChildSlot, string[]> = {
   'dps-1': ['party_status', 'party_wait', 'party_health', 'work_claim', 'work_submit', 'member_checkpoint', 'party_message', 'read', 'write', 'edit', 'glob', 'grep', 'bash'],
   'dps-2': ['party_status', 'party_wait', 'party_health', 'work_claim', 'work_submit', 'member_checkpoint', 'party_message', 'read', 'write', 'edit', 'glob', 'grep', 'bash'],
   'dps-3': ['party_status', 'party_wait', 'party_health', 'work_claim', 'work_submit', 'member_checkpoint', 'party_message', 'read', 'write', 'edit', 'glob', 'grep', 'bash'],
-  healer: ['party_status', 'party_wait', 'party_health', 'validation_manifest', 'validation_submit', 'member_self_maintain', 'battle_res', 'party_message', 'read', 'glob', 'grep'],
+  healer: ['party_status', 'party_wait', 'party_health', 'validation_manifest', 'validation_submit', 'verification_run', 'member_self_maintain', 'battle_res', 'party_message', 'read', 'glob', 'grep'],
 }
 
 const rolePersonas: Record<ChildSlot, string> = {

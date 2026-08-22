@@ -42,6 +42,11 @@ interface TaskLease {
   expiresAt: string;
   version: number;
 }
+interface ModifiedAssertion {
+  file: string;
+  test?: string;
+  reason: string;
+}
 interface ExecutionReport {
   taskId: string;
   taskVersion: number;
@@ -52,6 +57,7 @@ interface ExecutionReport {
   status: 'completed' | 'blocked' | 'failed';
   summary: string;
   changedFiles: string[];
+  modifiedAssertions?: ModifiedAssertion[];
   evidence: string[];
   commandsRun: Array<{
     command: string;
@@ -229,6 +235,13 @@ interface CommanderCheckpoint {
   workspaceFingerprint: string;
   createdAt: string;
 }
+interface VerificationCommandRun {
+  command: string;
+  exitCode?: number;
+  durationMs: number;
+  outputExcerpt: string;
+  beganAt: string;
+}
 interface DungeonRun {
   id: string;
   objective: string;
@@ -252,6 +265,7 @@ interface DungeonRun {
   commanderBattleResChargesRemaining: number;
   resurrectionRequests: ResurrectionRequest[];
   commanderRescueTickets: CommanderRescueTicket[];
+  verificationRuns: VerificationCommandRun[];
   resultSummary?: string;
   createdAt: string;
   updatedAt: string;

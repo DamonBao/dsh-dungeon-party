@@ -62,6 +62,8 @@ export declare const Config: z<Schemastery.ObjectS<{
         readinessCriticalSignalCount: z<number, number>;
         commanderMaxPendingDecisions: z<number, number>;
         commanderDecisionSlaMs: z<number, number>;
+        healerVerificationCommands: z<string[], string[]>;
+        healerVerificationTimeoutMs: z<number, number>;
         fingerprintIgnoreScopes: z<string[], string[]>;
         validationRequired: z<boolean, boolean>;
     }>, Schemastery.ObjectT<{
@@ -85,6 +87,8 @@ export declare const Config: z<Schemastery.ObjectS<{
         readinessCriticalSignalCount: z<number, number>;
         commanderMaxPendingDecisions: z<number, number>;
         commanderDecisionSlaMs: z<number, number>;
+        healerVerificationCommands: z<string[], string[]>;
+        healerVerificationTimeoutMs: z<number, number>;
         fingerprintIgnoreScopes: z<string[], string[]>;
         validationRequired: z<boolean, boolean>;
     }>>;
@@ -117,6 +121,8 @@ export declare const Config: z<Schemastery.ObjectS<{
         readinessCriticalSignalCount: z<number, number>;
         commanderMaxPendingDecisions: z<number, number>;
         commanderDecisionSlaMs: z<number, number>;
+        healerVerificationCommands: z<string[], string[]>;
+        healerVerificationTimeoutMs: z<number, number>;
         fingerprintIgnoreScopes: z<string[], string[]>;
         validationRequired: z<boolean, boolean>;
     }>, Schemastery.ObjectT<{
@@ -140,6 +146,8 @@ export declare const Config: z<Schemastery.ObjectS<{
         readinessCriticalSignalCount: z<number, number>;
         commanderMaxPendingDecisions: z<number, number>;
         commanderDecisionSlaMs: z<number, number>;
+        healerVerificationCommands: z<string[], string[]>;
+        healerVerificationTimeoutMs: z<number, number>;
         fingerprintIgnoreScopes: z<string[], string[]>;
         validationRequired: z<boolean, boolean>;
     }>>;
@@ -175,6 +183,8 @@ export declare class DungeonPartyService extends Service {
             readinessCriticalSignalCount: z<number, number>;
             commanderMaxPendingDecisions: z<number, number>;
             commanderDecisionSlaMs: z<number, number>;
+            healerVerificationCommands: z<string[], string[]>;
+            healerVerificationTimeoutMs: z<number, number>;
             fingerprintIgnoreScopes: z<string[], string[]>;
             validationRequired: z<boolean, boolean>;
         }>, Schemastery.ObjectT<{
@@ -198,6 +208,8 @@ export declare class DungeonPartyService extends Service {
             readinessCriticalSignalCount: z<number, number>;
             commanderMaxPendingDecisions: z<number, number>;
             commanderDecisionSlaMs: z<number, number>;
+            healerVerificationCommands: z<string[], string[]>;
+            healerVerificationTimeoutMs: z<number, number>;
             fingerprintIgnoreScopes: z<string[], string[]>;
             validationRequired: z<boolean, boolean>;
         }>>;
@@ -230,6 +242,8 @@ export declare class DungeonPartyService extends Service {
             readinessCriticalSignalCount: z<number, number>;
             commanderMaxPendingDecisions: z<number, number>;
             commanderDecisionSlaMs: z<number, number>;
+            healerVerificationCommands: z<string[], string[]>;
+            healerVerificationTimeoutMs: z<number, number>;
             fingerprintIgnoreScopes: z<string[], string[]>;
             validationRequired: z<boolean, boolean>;
         }>, Schemastery.ObjectT<{
@@ -253,6 +267,8 @@ export declare class DungeonPartyService extends Service {
             readinessCriticalSignalCount: z<number, number>;
             commanderMaxPendingDecisions: z<number, number>;
             commanderDecisionSlaMs: z<number, number>;
+            healerVerificationCommands: z<string[], string[]>;
+            healerVerificationTimeoutMs: z<number, number>;
             fingerprintIgnoreScopes: z<string[], string[]>;
             validationRequired: z<boolean, boolean>;
         }>>;

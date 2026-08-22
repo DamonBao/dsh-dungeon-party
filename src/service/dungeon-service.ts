@@ -65,6 +65,12 @@ export interface TaskLease {
   version: number
 }
 
+export interface ModifiedAssertion {
+  file: string
+  test?: string
+  reason: string
+}
+
 export interface ExecutionReport {
   taskId: string
   taskVersion: number
@@ -75,6 +81,7 @@ export interface ExecutionReport {
   status: 'completed' | 'blocked' | 'failed'
   summary: string
   changedFiles: string[]
+  modifiedAssertions?: ModifiedAssertion[]
   evidence: string[]
   commandsRun: Array<{ command: string; exitCode?: number; summary: string }>
   risks: string[]
@@ -269,6 +276,23 @@ export interface CommanderCheckpoint {
   createdAt: string
 }
 
+export interface VerificationCommandRun {
+  command: string
+  exitCode?: number
+  durationMs: number
+  outputExcerpt: string
+  beganAt: string
+}
+
+export interface VerificationCommandResult {
+  command: string
+  exitCode?: number
+  durationMs: number
+  output?: string
+  outputExcerpt?: string
+  beganAt: string
+}
+
 export interface DungeonRun {
   id: string
   objective: string
@@ -292,6 +316,7 @@ export interface DungeonRun {
   commanderBattleResChargesRemaining: number
   resurrectionRequests: ResurrectionRequest[]
   commanderRescueTickets: CommanderRescueTicket[]
+  verificationRuns: VerificationCommandRun[]
   resultSummary?: string
   createdAt: string
   updatedAt: string
@@ -342,6 +367,8 @@ export interface DungeonConfig {
   readinessCriticalSignalCount: number
   commanderMaxPendingDecisions: number
   commanderDecisionSlaMs: number
+  healerVerificationCommands: string[]
+  healerVerificationTimeoutMs: number
   fingerprintIgnoreScopes: string[]
   validationRequired: boolean
 }
@@ -404,6 +431,8 @@ export const defaultDungeonConfig: Readonly<DungeonConfig> = {
   readinessCriticalSignalCount: 2,
   commanderMaxPendingDecisions: 6,
   commanderDecisionSlaMs: 180_000,
+  healerVerificationCommands: ['npm test', 'npm run typecheck', 'npx tsc --noEmit', 'git status --short', 'git diff --stat', 'git diff --numstat'],
+  healerVerificationTimeoutMs: 120_000,
   fingerprintIgnoreScopes: [
     '.git/**', 'node_modules/**', 'lib/**', 'dist/**', 'coverage/**', '.dsh/dungeon-party/tmp/**',
   ],
@@ -451,11 +480,14 @@ export function resolveDungeonConfig(input: Partial<DungeonConfig>): DungeonConf
     'readinessCriticalSignalCount',
     'commanderMaxPendingDecisions',
     'commanderDecisionSlaMs',
+    'healerVerificationTimeoutMs',
   ]
   for (const key of positiveIntegers) {
     const value = config[key]
     assert(typeof value === 'number' && Number.isInteger(value) && value >= 1, 'INVALID_CONFIG', `${key} must be a positive integer`)
   }
+  assert(Array.isArray(config.healerVerificationCommands) && config.healerVerificationCommands.length > 0 && config.healerVerificationCommands.every((command) => typeof command === 'string' && command.trim().length > 0), 'INVALID_CONFIG', 'healerVerificationCommands must be a non-empty array of non-empty strings')
+  assert(new Set(config.healerVerificationCommands).size === config.healerVerificationCommands.length, 'INVALID_CONFIG', 'healerVerificationCommands must be unique')
   assert(config.maxConcurrentDps <= 3, 'INVALID_CONFIG', 'maxConcurrentDps cannot exceed 3')
   assert(config.battleResCharges >= 0 && Number.isInteger(config.battleResCharges), 'INVALID_CONFIG', 'battleResCharges must be a non-negative integer')
   assert(config.commanderBattleResCharges >= 1 && Number.isInteger(config.commanderBattleResCharges), 'INVALID_CONFIG', 'commanderBattleResCharges must be a positive integer')
@@ -629,6 +661,7 @@ export class DungeonService {
       commanderBattleResChargesRemaining: this.config.commanderBattleResCharges,
       resurrectionRequests: [],
       commanderRescueTickets: [],
+      verificationRuns: [],
       createdAt: now,
       updatedAt: now,
     }
@@ -863,6 +896,16 @@ export class DungeonService {
       'Execution report list fields are required',
     )
     assert(report.commandsRun.every((item) => item && typeof item.command === 'string' && typeof item.summary === 'string'), 'INVALID_REPORT', 'commandsRun entries are invalid')
+    const changedTestFile = report.changedFiles.some((file) => typeof file === 'string' && /(?:^|\/)tests\/|\.test\.[^/]+$/.test(file))
+    if (changedTestFile) {
+      assert(report.modifiedAssertions !== undefined, 'MODIFIED_ASSERTIONS_REQUIRED', 'Test changes require modifiedAssertions disclosure')
+      assert(Array.isArray(report.modifiedAssertions), 'INVALID_ARGS', 'modifiedAssertions must be an array')
+      assert(report.modifiedAssertions.length > 0, 'MODIFIED_ASSERTIONS_REQUIRED', 'Test changes require modifiedAssertions disclosure')
+    }
+    if (report.modifiedAssertions !== undefined) {
+      assert(Array.isArray(report.modifiedAssertions), 'INVALID_ARGS', 'modifiedAssertions must be an array')
+      assert(report.modifiedAssertions.every((item) => item && typeof item.file === 'string' && item.file.trim() && typeof item.reason === 'string' && item.reason.trim() && (item.test === undefined || typeof item.test === 'string')), 'INVALID_ARGS', 'modifiedAssertions entries require non-empty file and reason')
+    }
     assert(report.evidence.length > 0 || report.status !== 'completed', 'INVALID_REPORT', 'Completed work needs evidence')
     const globalCommandOwners = new Map(
       Object.values(run.tasks).flatMap((record) =>
@@ -893,6 +936,26 @@ export class DungeonService {
     }
     this.append(run, 'dungeon/task-submitted', { report: clone(report) }, actor.sessionId)
     return clone(this.requireRun(runId).tasks[report.taskId]!)
+  }
+
+  recordVerificationCommand(actor: Actor, runId: string, result: VerificationCommandResult): VerificationCommandRun {
+    const run = this.requireRun(runId)
+    assert(run.slots.healer.currentSessionId === actor.sessionId, 'FORBIDDEN', 'Only the currently bound healer may record verification commands')
+    assert(typeof result.command === 'string' && this.config.healerVerificationCommands.includes(result.command), 'INVALID_COMMAND', 'Verification command is not allowlisted')
+    assert(Number.isInteger(result.durationMs) && result.durationMs >= 0, 'INVALID_ARGS', 'Verification duration must be a non-negative integer')
+    assert(typeof result.beganAt === 'string' && result.beganAt.length > 0, 'INVALID_ARGS', 'Verification beganAt is required')
+    assert(result.exitCode === undefined || Number.isInteger(result.exitCode), 'INVALID_ARGS', 'Verification exitCode must be an integer')
+    const output = result.outputExcerpt ?? result.output ?? ''
+    assert(typeof output === 'string', 'INVALID_ARGS', 'Verification output must be a string')
+    const recorded: VerificationCommandRun = {
+      command: result.command,
+      ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }),
+      durationMs: result.durationMs,
+      outputExcerpt: output.slice(0, 4000),
+      beganAt: result.beganAt,
+    }
+    this.append(run, 'dungeon/verification-command-run', recorded, actor.sessionId)
+    return clone(recorded)
   }
 
   markMemberDown(runId: string, slot: DpsSlot, reason: string): DungeonRun {
@@ -1811,6 +1874,16 @@ export class DungeonService {
     return clone(this.config.fingerprintIgnoreScopes)
   }
 
+  /** Read-only healer verification allowlist for tool-layer preflight checks. */
+  getHealerVerificationCommands(): string[] {
+    return clone(this.config.healerVerificationCommands)
+  }
+
+  /** Read-only healer verification timeout cap for tool-layer preflight checks. */
+  getHealerVerificationTimeoutMs(): number {
+    return this.config.healerVerificationTimeoutMs
+  }
+
   /** Enumerate in-memory run ids for watchdog sweeps and diagnostics. */
   listRunIds(): string[] {
     return [...this.runs.keys()]
@@ -1874,6 +1947,7 @@ export class DungeonService {
         commanderBattleResChargesRemaining: payload.commanderBattleResCharges,
         resurrectionRequests: [],
         commanderRescueTickets: [],
+        verificationRuns: [],
         createdAt: payload.createdAt,
         updatedAt: event.occurredAt,
       }
@@ -2016,6 +2090,9 @@ export class DungeonService {
         run.slots[payload.lease.ownerSlot as DpsSlot].activityState = 'running'
         break
       }
+      case 'dungeon/verification-command-run':
+        run.verificationRuns.push(payload as VerificationCommandRun)
+        break
       case 'dungeon/task-submitted': {
         const report = payload.report as ExecutionReport
         const task = run.tasks[report.taskId]!

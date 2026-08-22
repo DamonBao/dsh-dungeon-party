@@ -40,6 +40,11 @@ export interface TaskLease {
     expiresAt: string;
     version: number;
 }
+export interface ModifiedAssertion {
+    file: string;
+    test?: string;
+    reason: string;
+}
 export interface ExecutionReport {
     taskId: string;
     taskVersion: number;
@@ -50,6 +55,7 @@ export interface ExecutionReport {
     status: 'completed' | 'blocked' | 'failed';
     summary: string;
     changedFiles: string[];
+    modifiedAssertions?: ModifiedAssertion[];
     evidence: string[];
     commandsRun: Array<{
         command: string;
@@ -230,6 +236,21 @@ export interface CommanderCheckpoint {
     workspaceFingerprint: string;
     createdAt: string;
 }
+export interface VerificationCommandRun {
+    command: string;
+    exitCode?: number;
+    durationMs: number;
+    outputExcerpt: string;
+    beganAt: string;
+}
+export interface VerificationCommandResult {
+    command: string;
+    exitCode?: number;
+    durationMs: number;
+    output?: string;
+    outputExcerpt?: string;
+    beganAt: string;
+}
 export interface DungeonRun {
     id: string;
     objective: string;
@@ -253,6 +274,7 @@ export interface DungeonRun {
     commanderBattleResChargesRemaining: number;
     resurrectionRequests: ResurrectionRequest[];
     commanderRescueTickets: CommanderRescueTicket[];
+    verificationRuns: VerificationCommandRun[];
     resultSummary?: string;
     createdAt: string;
     updatedAt: string;
@@ -299,6 +321,8 @@ export interface DungeonConfig {
     readinessCriticalSignalCount: number;
     commanderMaxPendingDecisions: number;
     commanderDecisionSlaMs: number;
+    healerVerificationCommands: string[];
+    healerVerificationTimeoutMs: number;
     fingerprintIgnoreScopes: string[];
     validationRequired: boolean;
 }
@@ -348,6 +372,7 @@ export declare class DungeonService {
     assignTask(actor: Actor, runId: string, taskId: string, slot: DpsSlot): TaskRecord;
     claimTask(actor: Actor, runId: string, taskId: string): TaskLease;
     submitExecution(actor: Actor, runId: string, report: ExecutionReport): TaskRecord;
+    recordVerificationCommand(actor: Actor, runId: string, result: VerificationCommandResult): VerificationCommandRun;
     markMemberDown(runId: string, slot: DpsSlot, reason: string): DungeonRun;
     observeAgentDisposed(sessionId: string, reason: string): DungeonRun[];
     requestBattleRes(actor: Actor, runId: string, slot: DpsSlot, resurrectionId?: string): ResurrectionRequest;
@@ -399,6 +424,10 @@ export declare class DungeonService {
     waitForChange(actor: Actor, runId: string, afterSequence: number, timeoutMs?: number, signal?: AbortSignal): Promise<DungeonWaitResult>;
     sendPartyMessage(actor: Actor, runId: string, toSlot: PartySlot, input: PartyMessageInput): PartyMessage;
     getFingerprintIgnoreScopes(): string[];
+    /** Read-only healer verification allowlist for tool-layer preflight checks. */
+    getHealerVerificationCommands(): string[];
+    /** Read-only healer verification timeout cap for tool-layer preflight checks. */
+    getHealerVerificationTimeoutMs(): number;
     /** Enumerate in-memory run ids for watchdog sweeps and diagnostics. */
     listRunIds(): string[];
     getRun(runId: string): DungeonRun;

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { spawn } from 'node:child_process'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type JsonValue, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 
@@ -17,6 +18,7 @@ import {
   type ValidationSubmission,
   type WorkOrder,
   type DungeonService,
+  type ModifiedAssertion,
 } from '../service/dungeon-service.js'
 
 function actor(exec: ToolRunContext): { sessionId: string } {
@@ -81,6 +83,9 @@ function summarizeRun(run: DungeonRun) {
     leaseVersion: task.activeLease?.version,
     nextCheckpointDueAt: task.nextCheckpointDueAt,
     summary: boundedText(task.executionReports.at(-1)?.summary, 300),
+    modifiedAssertions: task.executionReports.at(-1)?.modifiedAssertions?.slice(0, 20).map((item) => ({
+      file: boundedText(item.file, 300), test: boundedText(item.test, 300), reason: boundedText(item.reason, 500),
+    })),
   }))
   return {
     id: run.id,
@@ -111,6 +116,10 @@ function summarizeRun(run: DungeonRun) {
     battleResChargesRemaining: run.battleResChargesRemaining,
     commanderBattleResChargesRemaining: run.commanderBattleResChargesRemaining,
     validationReportCount: run.validationReports.length,
+    verificationRuns: run.verificationRuns.slice(-8).map((item) => ({
+      command: item.command, exitCode: item.exitCode, durationMs: item.durationMs, beganAt: item.beganAt,
+      outputExcerpt: boundedText(item.outputExcerpt, 600),
+    })),
     resultSummary: boundedText(run.resultSummary, 500),
     updatedAt: run.updatedAt,
   }
@@ -215,6 +224,16 @@ function normalizeExecutionReport(
     ? value.summary.trim()
     : typeof value.text === 'string' && value.text.trim() ? value.text.trim() : `${status} ${task.workOrder.title}`
   const commandsRun = value.commandsRun === undefined ? [] : value.commandsRun
+  const modifiedAssertions = value.modifiedAssertions
+  if (modifiedAssertions !== undefined) {
+    if (!Array.isArray(modifiedAssertions)) throw new DungeonError('INVALID_ARGS', 'report.modifiedAssertions must be an array')
+    if (!modifiedAssertions.every((entry) => {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return false
+      const item = entry as Record<string, unknown>
+      return typeof item.file === 'string' && item.file.trim() && typeof item.reason === 'string' && item.reason.trim() &&
+        (item.test === undefined || typeof item.test === 'string')
+    })) throw new DungeonError('INVALID_ARGS', 'report.modifiedAssertions entries require file and reason')
+  }
   if (!Array.isArray(commandsRun) || !commandsRun.every((entry) => (
     typeof entry === 'object' && entry !== null && typeof (entry as Record<string, unknown>).command === 'string'
   ))) throw new DungeonError('INVALID_ARGS', 'report.commandsRun must contain command objects')
@@ -229,6 +248,10 @@ function normalizeExecutionReport(
     status: status as ExecutionReport['status'],
     summary: boundedText(summary) ?? status,
     changedFiles: stringList(value.changedFiles, 'report.changedFiles'),
+    ...(modifiedAssertions === undefined ? {} : { modifiedAssertions: (modifiedAssertions as unknown[]).map((entry) => {
+      const item = entry as Record<string, unknown>
+      return { file: (item.file as string).trim(), ...(item.test === undefined ? {} : { test: (item.test as string).trim() }), reason: (item.reason as string).trim() }
+    }) as ModifiedAssertion[] }),
     evidence: boundedEvidenceList(value.evidence, 'report.evidence'),
     commandsRun: commandsRun.map((entry) => {
       const command = entry as Record<string, unknown>
@@ -272,6 +295,42 @@ const output = {
   render: (_args: unknown, value: JsonValue) => [
     { type: 'text' as const, text: JSON.stringify(value, null, 2) },
   ],
+}
+
+const DEFAULT_VERIFICATION_COMMANDS = ['npm test', 'npm run typecheck', 'npx tsc --noEmit', 'git status --short', 'git diff --stat', 'git diff --numstat']
+const DEFAULT_VERIFICATION_TIMEOUT_MS = 120_000
+
+function verificationCommands(service: DungeonService): string[] {
+  const getter = (service as DungeonService & { getHealerVerificationCommands?: () => string[] }).getHealerVerificationCommands
+  return getter ? getter.call(service) : [...DEFAULT_VERIFICATION_COMMANDS]
+}
+
+function verificationTimeout(service: DungeonService): number {
+  const getter = (service as DungeonService & { getHealerVerificationTimeoutMs?: () => number }).getHealerVerificationTimeoutMs
+  return getter ? getter.call(service) : DEFAULT_VERIFICATION_TIMEOUT_MS
+}
+
+function excerpt(head: string, tail: string, limit = 4000): string {
+  const text = `${head}${head && tail ? '\\n' : ''}${tail}`
+  if (text.length <= limit) return text
+  const headLimit = Math.floor(limit * 0.6)
+  return `${text.slice(0, headLimit)}\\n…\\n${text.slice(-Math.max(0, limit - headLimit - 3))}`
+}
+
+async function runVerification(command: string, timeoutMs: number, cwd: string): Promise<{ exitCode?: number; outputExcerpt: string; durationMs: number; timedOut: boolean }> {
+  const parts = command.trim().split(/\\s+/)
+  const started = Date.now()
+  return await new Promise((resolve) => {
+    const child = spawn(parts[0]!, parts.slice(1), { cwd, shell: false })
+    let stdout = ''
+    let stderr = ''
+    let timedOut = false
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM') }, timeoutMs)
+    child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+    child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
+    child.on('close', (code) => { clearTimeout(timer); resolve({ ...(code === null ? {} : { exitCode: code }), outputExcerpt: excerpt(stdout, stderr), durationMs: Date.now() - started, timedOut }) })
+    child.on('error', () => { clearTimeout(timer); resolve({ outputExcerpt: excerpt(stdout, stderr), durationMs: Date.now() - started, timedOut }) })
+  })
 }
 
 export function registerDungeonTools(
@@ -702,6 +761,33 @@ export function registerDungeonTools(
         agentManager?.completeLeaseAudit(args.runId, report.taskId)
         await agentManager?.kickScheduler(args.runId)
         return json(task)
+      },
+    })),
+    ctx.tools.register(defineTool({
+      name: 'verification_run',
+      description: 'Healer-only: execute one allowlisted workspace verification command and persist its bounded result.',
+      parameters: {
+        runId: { type: 'string', required: true },
+        command: { type: 'string', required: true },
+        timeoutMs: { type: 'number' },
+      },
+      output,
+      async execute(args, exec) {
+        const caller = actor(exec)
+        const run = service.getRunForActor(caller, args.runId)
+        if (run.slots.healer.currentSessionId !== caller.sessionId) throw new DungeonError('FORBIDDEN', 'verification_run is healer-only')
+        const commands = verificationCommands(service)
+        if (typeof args.command !== 'string' || !commands.includes(args.command)) throw new DungeonError('INVALID_COMMAND', 'Command is not allowlisted')
+        const limit = verificationTimeout(service)
+        const requested = args.timeoutMs ?? limit
+        if (!Number.isInteger(requested) || requested < 1 || requested > limit) throw new DungeonError('INVALID_ARGS', `timeoutMs must be a positive integer <= ${limit}`)
+        const result = await runVerification(args.command, requested, run.workspaceRoot)
+        if (result.timedOut) return json({ code: 'VERIFICATION_TIMEOUT', command: args.command, durationMs: result.durationMs, outputExcerpt: result.outputExcerpt })
+        const recorded = service.recordVerificationCommand(caller, args.runId, {
+          command: args.command, ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }), durationMs: result.durationMs,
+          outputExcerpt: result.outputExcerpt, beganAt: new Date(Date.now() - result.durationMs).toISOString(),
+        })
+        return json(recorded)
       },
     })),
     ctx.tools.register(defineTool({
