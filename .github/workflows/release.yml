@@ -101,7 +101,7 @@ jobs:
           if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version >/dev/null 2>&1; then
             echo "$PACKAGE_NAME@$PACKAGE_VERSION is already published; skipping npm publish."
           else
-            npm publish "artifacts/${{ steps.pack.outputs.tarball }}" \
+            npm publish "./artifacts/${{ steps.pack.outputs.tarball }}" \
               --access public \
               --provenance \
               --tag "$DIST_TAG"
