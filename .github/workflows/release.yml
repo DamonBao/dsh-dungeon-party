@@ -106,8 +106,3 @@ jobs:
               --provenance \
               --tag "$DIST_TAG"
           fi
-
-      - name: Attach package to GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$RELEASE_TAG" "artifacts/${{ steps.pack.outputs.tarball }}" --clobber
