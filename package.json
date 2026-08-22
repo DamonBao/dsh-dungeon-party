@@ -1,6 +1,6 @@
 {
   "name": "@jcy2387/dsh-dungeon-party",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "DSH five-agent dungeon party orchestration plugin",
   "repository": {
     "type": "git",
