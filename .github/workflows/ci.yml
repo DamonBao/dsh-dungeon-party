@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate on Node.js 22
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build package
+        run: npm run build
+
+      - name: Verify committed build artifacts
+        shell: bash
+        run: |
+          if [[ -n "$(git status --porcelain -- lib)" ]]; then
+            git status --short -- lib
+            echo "Committed lib/ artifacts are not synchronized with source." >&2
+            exit 1
+          fi
+
+      - name: Pack release candidate
+        run: |
+          mkdir -p artifacts
+          npm pack --pack-destination artifacts
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-package-${{ github.sha }}
+          path: artifacts/*.tgz
+          if-no-files-found: error
+          retention-days: 14

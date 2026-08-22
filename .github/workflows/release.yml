@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish npm package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Node.js and npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify release version
+        id: version
+        shell: bash
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          LOCK_VERSION="$(node -p "require('./package-lock.json').version")"
+          TAG_VERSION="${RELEASE_TAG#v}"
+
+          if [[ "$PACKAGE_VERSION" != "$LOCK_VERSION" ]]; then
+            echo "package.json ($PACKAGE_VERSION) and package-lock.json ($LOCK_VERSION) differ" >&2
+            exit 1
+          fi
+          if [[ "$TAG_VERSION" != "$PACKAGE_VERSION" ]]; then
+            echo "Release tag $RELEASE_TAG must match package version v$PACKAGE_VERSION" >&2
+            exit 1
+          fi
+
+          DIST_TAG=latest
+          if [[ "$PACKAGE_VERSION" == *-* ]]; then
+            DIST_TAG=next
+          fi
+
+          echo "package-version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "dist-tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build package
+        run: npm run build
+
+      - name: Verify committed build artifacts
+        shell: bash
+        run: |
+          if [[ -n "$(git status --porcelain -- lib)" ]]; then
+            git status --short -- lib
+            echo "Committed lib/ artifacts are not synchronized with source." >&2
+            exit 1
+          fi
+
+      - name: Pack npm tarball
+        id: pack
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          TARBALL="$(npm pack --pack-destination artifacts)"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to npm with provenance
+        shell: bash
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package-version }}
+          DIST_TAG: ${{ steps.version.outputs.dist-tag }}
+        run: |
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version >/dev/null 2>&1; then
+            echo "$PACKAGE_NAME@$PACKAGE_VERSION is already published; skipping npm publish."
+          else
+            npm publish "artifacts/${{ steps.pack.outputs.tarball }}" \
+              --access public \
+              --provenance \
+              --tag "$DIST_TAG"
+          fi
+
+      - name: Attach package to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" "artifacts/${{ steps.pack.outputs.tarball }}" --clobber
