@@ -1,3 +1,5 @@
+> **状态（2026-08-24 标注）**：本报告基于更早代码快照，行号与部分结论已失效；请以 `reviews/full-stack-review-2026-08-24.md` 为准。其中的 P0/P1 项已在后续修复中落地并补充回归测试。
+
 # 核心状态机与事件溯源评审报告（src/service）
 
 > **评审范围**：`src/service/dungeon-service.ts`（2204 行）、`src/service/memory-event-store.ts`（31 行）、`src/index.ts`（13 行）  

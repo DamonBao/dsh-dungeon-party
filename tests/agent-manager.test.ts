@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi, type Mock } from 'vitest'
@@ -393,6 +393,191 @@ describe('PartyAgentManager', () => {
     }
   })
 
+  it('denies shell write primitives under an active lease but keeps safe commands', async () => {
+    const { service, manager, on } = setup()
+    const tank = { sessionId: 'tank' }
+    await manager.ensureMember(tank, 'run', 'healer')
+    await manager.ensureMember(tank, 'run', 'dps-1')
+    service.changePhase(tank, 'run', 'PLANNING')
+    service.createTask(tank, 'run', {
+      id: 'task', runId: 'run', title: 'Task', objective: 'Edit src', inputs: [], constraints: [],
+      acceptanceCriteria: [{ id: 'done', description: 'Done', required: true }],
+      readScopes: ['src/**'], writeScopes: ['src/**'], blockedBy: [], expectedArtifacts: [],
+      priority: 'normal', required: true, version: 1,
+    })
+    service.changePhase(tank, 'run', 'EXECUTING')
+    service.assignTask(tank, 'run', 'task', 'dps-1')
+    service.claimTask({ sessionId: 'run-dps-1-g1' }, 'run', 'task')
+    const guard = on.mock.calls.find(([event]) => event === 'tools/pre-execute')?.[1]
+    const next = vi.fn(async () => ({ kind: 'allow' }))
+
+    // Shell constructs that bypass the scope-checked write/edit tools.
+    const denied = [
+      'echo hacked > src/evil.txt',
+      'echo hacked >> src/evil.txt',
+      'sed -i s/a/b/ src/index.ts',
+      'cp /etc/passwd src/passwd',
+      'rm -rf src',
+      'mv src/index.ts src/other.ts',
+      "node -e \"require('fs').writeFileSync('src/x','y')\"",
+      "python3 -c \"open('src/x','w')\"",
+      'bash -c "echo hi > src/x"',
+      'eval "$(cat script)"',
+    ]
+    for (const command of denied) {
+      await expect(guard({ name: 'bash', arguments: { command } }, next))
+        .resolves.toMatchObject({ kind: 'deny' })
+    }
+
+    // Read-only and test commands stay available.
+    for (const command of ['npm test', 'npm run typecheck', 'git status --short', 'ls -la src']) {
+      await expect(guard({ name: 'bash', arguments: { command } }, next))
+        .resolves.toMatchObject({ kind: 'allow' })
+    }
+  })
+
+  it('denies writes that escape the workspace through symlinks', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dungeon-symlink-'))
+    const outside = mkdtempSync(join(tmpdir(), 'dungeon-outside-'))
+    mkdirSync(join(root, 'src'))
+    writeFileSync(join(root, 'src', 'index.ts'), 'export {}\n')
+    try {
+      symlinkSync(outside, join(root, 'src', 'escape'))
+      writeFileSync(join(outside, 'target.txt'), 'x\n')
+      symlinkSync(join(outside, 'target.txt'), join(root, 'src', 'link.txt'))
+      const { service, manager, on } = setup(root)
+      const tank = { sessionId: 'tank' }
+      await manager.ensureMember(tank, 'run', 'healer')
+      await manager.ensureMember(tank, 'run', 'dps-1')
+      service.changePhase(tank, 'run', 'PLANNING')
+      service.createTask(tank, 'run', {
+        id: 'task', runId: 'run', title: 'Task', objective: 'Edit src', inputs: [], constraints: [],
+        acceptanceCriteria: [{ id: 'done', description: 'Done', required: true }],
+        readScopes: ['src/**'], writeScopes: ['src/**'], blockedBy: [], expectedArtifacts: [],
+        priority: 'normal', required: true, version: 1,
+      })
+      service.changePhase(tank, 'run', 'EXECUTING')
+      service.assignTask(tank, 'run', 'task', 'dps-1')
+      service.claimTask({ sessionId: 'run-dps-1-g1' }, 'run', 'task')
+      const guard = on.mock.calls.find(([event]) => event === 'tools/pre-execute')?.[1]
+      const allow = vi.fn(async () => ({ kind: 'allow' }))
+
+      // A symlinked directory component inside the scope still escapes.
+      await expect(guard({ name: 'write', arguments: { file_path: 'src/escape/evil.txt' } }, allow))
+        .resolves.toMatchObject({ kind: 'deny', reason: expect.stringContaining('symlink') })
+      // A symlinked file target is never followed.
+      await expect(guard({ name: 'write', arguments: { file_path: 'src/link.txt' } }, allow))
+        .resolves.toMatchObject({ kind: 'deny', reason: expect.stringContaining('symlink') })
+      // Regular files inside the scope stay writable.
+      await expect(guard({ name: 'write', arguments: { file_path: 'src/new.ts' } }, allow))
+        .resolves.toMatchObject({ kind: 'allow' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('does not double-assign slots that own unclaimed tasks and reuses freed slots', async () => {
+    const { service, manager } = setup()
+    const tank = { sessionId: 'tank' }
+    service.changePhase(tank, 'run', 'PLANNING')
+    for (const [index, scope] of [['1', 'src/a/**'], ['2', 'src/b/**'], ['3', 'src/c/**'], ['4', 'src/d/**']] as const) {
+      service.createTask(tank, 'run', {
+        id: `task-${index}`, runId: 'run', title: `Task ${index}`, objective: `Do ${index}`, inputs: [], constraints: [],
+        acceptanceCriteria: [{ id: `done-${index}`, description: 'Done', required: index !== '4' }],
+        readScopes: ['src/**'], writeScopes: [scope], blockedBy: [], expectedArtifacts: [],
+        priority: 'normal', required: index !== '4', version: 1,
+      })
+    }
+    await manager.prepareForPhase(tank, 'run', 'EXECUTING')
+    service.changePhase(tank, 'run', 'EXECUTING')
+
+    await manager.dispatchAvailableTasks(tank, 'run')
+    const run = service.getRun('run')
+    // Three DPS slots take one task each; none is claimed yet.
+    expect(run.tasks['task-1']).toMatchObject({ ownerSlot: 'dps-1', status: 'ready' })
+    expect(run.tasks['task-2']).toMatchObject({ ownerSlot: 'dps-2', status: 'ready' })
+    expect(run.tasks['task-3']).toMatchObject({ ownerSlot: 'dps-3', status: 'ready' })
+    expect(run.tasks['task-4']!.ownerSlot).toBeUndefined()
+
+    // A repeated kick must not stack a second task on any busy slot.
+    await manager.dispatchAvailableTasks(tank, 'run')
+    expect(service.getRun('run').tasks['task-4']!.ownerSlot).toBeUndefined()
+
+    // Freeing dps-2 (submit completed) lets the queued task land there.
+    const lease = service.claimTask({ sessionId: 'run-dps-2-g1' }, 'run', 'task-2')
+    service.submitExecution({ sessionId: 'run-dps-2-g1' }, 'run', {
+      taskId: 'task-2', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
+      slot: 'dps-2', generation: 1, status: 'completed', summary: 'done',
+      changedFiles: [], evidence: ['done'], commandsRun: [], risks: [], remainingWork: [],
+    })
+    await manager.dispatchAvailableTasks(tank, 'run')
+    expect(service.getRun('run').tasks['task-4']).toMatchObject({ ownerSlot: 'dps-2', status: 'ready' })
+  })
+
+  it('skips bound-but-down slots instead of handing them new work', async () => {
+    const { service, manager } = setup()
+    const tank = { sessionId: 'tank' }
+    await manager.ensureMember(tank, 'run', 'dps-1')
+    service.markMemberDown('run', 'dps-1', 'runtime crashed')
+    service.changePhase(tank, 'run', 'PLANNING')
+    service.createTask(tank, 'run', {
+      id: 'task', runId: 'run', title: 'Task', objective: 'Do it', inputs: [], constraints: [],
+      acceptanceCriteria: [{ id: 'done', description: 'Done', required: true }],
+      readScopes: ['src/**'], writeScopes: ['src/**'], blockedBy: [], expectedArtifacts: [],
+      priority: 'normal', required: true, version: 1,
+    })
+    await manager.prepareForPhase(tank, 'run', 'EXECUTING')
+    service.changePhase(tank, 'run', 'EXECUTING')
+
+    await manager.dispatchAvailableTasks(tank, 'run')
+
+    expect(service.getRun('run').tasks['task']!.ownerSlot).toBe('dps-2')
+  })
+
+  it('rebuilds missing lease audit baselines after a manager restart', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dungeon-rebuild-'))
+    mkdirSync(join(root, 'src'))
+    writeFileSync(join(root, 'src', 'index.ts'), 'export {}\n')
+    try {
+      const { service, manager, agents, presets } = setup(root)
+      const tank = { sessionId: 'tank' }
+      await manager.ensureMember(tank, 'run', 'healer')
+      await manager.ensureMember(tank, 'run', 'dps-1')
+      service.changePhase(tank, 'run', 'PLANNING')
+      service.createTask(tank, 'run', {
+        id: 'task', runId: 'run', title: 'Task', objective: 'Edit src', inputs: [], constraints: [],
+        acceptanceCriteria: [{ id: 'done', description: 'Done', required: true }],
+        readScopes: ['src/**'], writeScopes: ['src/**'], blockedBy: [], expectedArtifacts: [],
+        priority: 'normal', required: true, version: 1,
+      })
+      service.changePhase(tank, 'run', 'EXECUTING')
+      service.assignTask(tank, 'run', 'task', 'dps-1')
+      const dps = { sessionId: 'run-dps-1-g1' }
+      const lease = service.claimTask(dps, 'run', 'task')
+      await manager.beginLeaseAudit(dps, 'run', 'task', lease.leaseId)
+
+      // Host restart: the lease survives in the event log, but the fresh
+      // manager lost its in-memory baseline and must not deadlock the submit.
+      const restarted = new PartyAgentManager(service, agents as never, presets as never)
+      const report = {
+        taskId: 'task', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
+        slot: 'dps-1' as const, generation: 1, status: 'completed' as const, summary: 'done',
+        changedFiles: [] as string[], evidence: ['done'],
+        commandsRun: [] as Array<{ command: string; summary: string }>,
+        risks: [] as string[], remainingWork: [] as string[],
+      }
+      await expect(restarted.auditWorkspaceBeforeSubmit(dps, 'run', report))
+        .rejects.toThrowError(expect.objectContaining({ code: 'WORKSPACE_AUDIT_MISSING' }))
+
+      await restarted.restoreBoundParty(tank, 'run')
+
+      await expect(restarted.auditWorkspaceBeforeSubmit(dps, 'run', report)).resolves.toBeUndefined()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('installs the execution guard on a live agent restored in place', async () => {
     const { service, manager, agents, presets, on } = setup()
     const tank = { sessionId: 'tank' }
@@ -470,7 +655,7 @@ describe('PartyAgentManager', () => {
     }
   })
 
-  it('re-baselines the lease audit when a checkpoint renews the lease', async () => {
+  it('accumulates the lease audit across checkpoint re-baselines', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dungeon-audit-'))
     mkdirSync(join(root, 'src'))
     writeFileSync(join(root, 'src', 'index.ts'), 'export {}\n')
@@ -492,18 +677,17 @@ describe('PartyAgentManager', () => {
       const lease = service.claimTask(dps, 'run', 'task')
       await manager.beginLeaseAudit(dps, 'run', 'task', lease.leaseId)
 
-      // External noise (e.g. another process) lands after the claim baseline.
-      writeFileSync(join(root, 'README.md'), 'escaped\n')
-      const report = (leaseVersion: number) => ({
+      // In-scope work lands before the checkpoint.
+      writeFileSync(join(root, 'src', 'one.ts'), 'export const one = 1\n')
+      const report = (leaseVersion: number, changedFiles: string[]) => ({
         taskId: 'task', taskVersion: 1, leaseId: lease.leaseId, leaseVersion,
         slot: 'dps-1' as const, generation: 1, status: 'completed' as const, summary: 'done',
-        changedFiles: [], evidence: ['done'], commandsRun: [], risks: [], remainingWork: [],
+        changedFiles, evidence: ['done'], commandsRun: [], risks: [], remainingWork: [],
       })
-      await expect(manager.auditWorkspaceBeforeSubmit(dps, 'run', report(1)))
-        .rejects.toThrowError(expect.objectContaining({ code: 'ACTUAL_WRITE_SCOPE_VIOLATION' }))
 
-      // The DPS submits a checkpoint: the lease renews and the audit baseline
-      // must reset so historical noise no longer blocks the submit.
+      // The DPS submits a checkpoint: the lease renews and the baseline rolls
+      // forward, but the audit must keep the whole-lease view — pre-checkpoint
+      // work stays attributable instead of vanishing into the new baseline.
       service.submitCheckpoint(dps, 'run', {
         checkpointId: 'cp-1', taskId: 'task', taskVersion: 1,
         leaseId: lease.leaseId, leaseVersion: 1, slot: 'dps-1',
@@ -511,7 +695,26 @@ describe('PartyAgentManager', () => {
         workspaceFingerprint: 'v1',
       })
       await manager.refreshLeaseAudit('run', 'task')
-      await expect(manager.auditWorkspaceBeforeSubmit(dps, 'run', report(2))).resolves.toBeUndefined()
+      writeFileSync(join(root, 'src', 'two.ts'), 'export const two = 2\n')
+      await expect(manager.auditWorkspaceBeforeSubmit(dps, 'run', report(2, ['src/one.ts', 'src/two.ts'])))
+        .resolves.toBeUndefined()
+      // Under-reporting the pre-checkpoint file is still caught.
+      await expect(manager.auditWorkspaceBeforeSubmit(dps, 'run', report(2, ['src/two.ts'])))
+        .rejects.toThrowError(expect.objectContaining({ code: 'CHANGED_FILES_MISMATCH' }))
+
+      // Out-of-scope noise landing before a later checkpoint must never be
+      // absorbed by the re-baseline either: it keeps blocking the submit even
+      // though the serial delta after the checkpoint alone looks clean.
+      writeFileSync(join(root, 'README.md'), 'escaped\n')
+      service.submitCheckpoint(dps, 'run', {
+        checkpointId: 'cp-2', taskId: 'task', taskVersion: 1,
+        leaseId: lease.leaseId, leaseVersion: 2, slot: 'dps-1',
+        completed: ['more'], nextSteps: ['next'], evidenceDelta: ['progress'], blockers: [],
+        workspaceFingerprint: 'v1',
+      })
+      await manager.refreshLeaseAudit('run', 'task')
+      await expect(manager.auditWorkspaceBeforeSubmit(dps, 'run', report(3, ['src/one.ts', 'src/two.ts', 'README.md'])))
+        .rejects.toThrowError(expect.objectContaining({ code: 'ACTUAL_WRITE_SCOPE_VIOLATION' }))
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

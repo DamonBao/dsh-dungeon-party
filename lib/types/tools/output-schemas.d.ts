@@ -240,6 +240,10 @@ export declare const taskRecordSchema: {
             readonly type: "integer";
             readonly required: true;
         };
+        readonly executionRetries: {
+            readonly type: "integer";
+            readonly required: true;
+        };
         readonly executionReports: {
             readonly type: "array";
             readonly items: {
@@ -884,6 +888,12 @@ export declare const runSummarySchema: {
                     readonly exitCode: {
                         readonly type: "number";
                     };
+                    readonly errorCode: {
+                        readonly type: "string";
+                    };
+                    readonly errorMessage: {
+                        readonly type: "string";
+                    };
                     readonly durationMs: {
                         readonly type: "number";
                         readonly required: true;
@@ -1438,6 +1448,12 @@ export declare const waitSchema: {
                             };
                             readonly exitCode: {
                                 readonly type: "number";
+                            };
+                            readonly errorCode: {
+                                readonly type: "string";
+                            };
+                            readonly errorMessage: {
+                                readonly type: "string";
                             };
                             readonly durationMs: {
                                 readonly type: "number";
@@ -2245,6 +2261,10 @@ export declare const assignmentSchema: {
                 readonly type: "integer";
                 readonly required: true;
             };
+            readonly executionRetries: {
+                readonly type: "integer";
+                readonly required: true;
+            };
             readonly executionReports: {
                 readonly type: "array";
                 readonly items: {
@@ -2969,6 +2989,12 @@ export declare const verificationSchema: {
             readonly exitCode: {
                 readonly type: "number";
             };
+            readonly errorCode: {
+                readonly type: "string";
+            };
+            readonly errorMessage: {
+                readonly type: "string";
+            };
             readonly durationMs: {
                 readonly type: "number";
                 readonly required: true;
@@ -3533,6 +3559,12 @@ export declare const runSummaryOutput: {
                         readonly exitCode: {
                             readonly type: "number";
                         };
+                        readonly errorCode: {
+                            readonly type: "string";
+                        };
+                        readonly errorMessage: {
+                            readonly type: "string";
+                        };
                         readonly durationMs: {
                             readonly type: "number";
                             readonly required: true;
@@ -4093,6 +4125,12 @@ export declare const waitOutput: {
                                 };
                                 readonly exitCode: {
                                     readonly type: "number";
+                                };
+                                readonly errorCode: {
+                                    readonly type: "string";
+                                };
+                                readonly errorMessage: {
+                                    readonly type: "string";
                                 };
                                 readonly durationMs: {
                                     readonly type: "number";
@@ -4912,6 +4950,10 @@ export declare const assignmentOutput: {
                     readonly type: "integer";
                     readonly required: true;
                 };
+                readonly executionRetries: {
+                    readonly type: "integer";
+                    readonly required: true;
+                };
                 readonly executionReports: {
                     readonly type: "array";
                     readonly items: {
@@ -5324,6 +5366,10 @@ export declare const taskRecordOutput: {
                 readonly type: "integer";
                 readonly required: true;
             };
+            readonly executionRetries: {
+                readonly type: "integer";
+                readonly required: true;
+            };
             readonly executionReports: {
                 readonly type: "array";
                 readonly items: {
@@ -5669,6 +5715,12 @@ export declare const verificationOutput: {
                 };
                 readonly exitCode: {
                     readonly type: "number";
+                };
+                readonly errorCode: {
+                    readonly type: "string";
+                };
+                readonly errorMessage: {
+                    readonly type: "string";
                 };
                 readonly durationMs: {
                     readonly type: "number";

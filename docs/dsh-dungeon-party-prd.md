@@ -1284,10 +1284,9 @@ workspaceMode: shared | git-worktree
 
 - `validation_manifest`：获取当前验收清单、工作区指纹和执行证据；
 - `validation_submit`：提交验收报告；
-- `member_checkpoint`：在恢复前保存当前验收或战复进度；
-- `member_self_maintain`：消费 T 下达的有效自我稳定指令并在原 Session 内恢复；
+- `member_self_maintain`：消费 T 下达的有效自我稳定指令并在原 Session 内恢复；验收与战复进度本身持久化为 `dungeon/event`，奶不需要也不持有 `member_checkpoint`（该工具仅属于 DPS）；
 - `battle_res`：消费 T 签发的 DPS 战复指令，或在 T down/unavailable 时直接消费服务签发的紧急指挥战复票据。
-- `verification_run`：仅绑定奶可调用，传入 `command`（字符串）及可选 `timeoutMs`（不得超过 `healerVerificationTimeoutMs`），在 `workspaceRoot` 以 `shell: false` 执行配置白名单中精确匹配的只读命令；返回 `{ command, exitCode, durationMs, outputExcerpt }`，并持久化 `dungeon/verification-command-run` 事件。非奶调用返回 `FORBIDDEN`，非白名单命令返回 `INVALID_COMMAND`，超时也结构化捕获并记录转录。
+- `verification_run`：仅绑定奶可调用，传入 `command`（字符串）及可选 `timeoutMs`（不得超过 `healerVerificationTimeoutMs`），在 `workspaceRoot` 以 `shell: false` 按空白拆分为 argv 执行配置白名单中精确匹配的只读命令；成功与非零退出返回并持久化 `{ command, exitCode, durationMs, outputExcerpt }`；spawn 失败（如 `ENOENT`）持久化 `{ command, errorCode, errorMessage, durationMs, outputExcerpt }`，绝不允许伪装成无退出码的正常记录；超时先 `SIGTERM`、宽限后 `SIGKILL`，返回结构化 `VERIFICATION_TIMEOUT` 且不落验证记录。非奶调用返回 `FORBIDDEN`，非白名单命令返回 `INVALID_COMMAND`。
 
 ### 12.4 工具通用规则
 
@@ -1351,9 +1350,9 @@ MVP 使用共享工作区，并执行以下规则：
 - `telemetry`：依赖宿主按 Session 提供文件写入审计，可精确验证每个 DPS 是否越界；
 - `aggregate`：只验证并行任务 `writeScopes` 的并集，能发现无人授权的文件变化，但不宣称能判断哪个 DPS 修改了另一个 DPS 的合法范围；
 - `serial`：没有遥测且要求严格按 Agent 归因时，服务将写任务串行执行；
-- `auto`：优先 `telemetry`，不可用时默认 `aggregate`；若 `strictPerAgentWriteScopes: true`，则回退为 `serial`。
+- `auto`：优先 `telemetry`；遥测不可用时默认 `serial`。在宿主 per-Agent 写入遥测真正接入之前，`aggregate` 只作为显式配置实验项保留，不再作为默认。
 
-因此，MVP 在 `aggregate` 模式下只把“活动任务范围并集之外的修改”作为机械门禁；“单个 DPS 不得修改他人合法范围”仍是角色协议和风险项，不对该模式作不可实现的强保证。
+因此，MVP 的默认机械门禁是“串行写租约 + 提交时全量 delta 比对”；`aggregate` 模式只能发现“活动任务范围并集之外的修改”，不能判断哪个 DPS 修改了另一个 DPS 的合法范围，显式选择该模式即接受这一弱化保证。
 
 ### 14.1 工作区指纹
 
@@ -1837,7 +1836,7 @@ allowMinorFindingsOnPass: true
 - [ ] T 能创建任务 DAG 并分配给 1～3 个 DPS；
 - [ ] DPS 只能操作分配给自己的工作单；
 - [ ] 三个 DPS 可在互不冲突范围内并行执行；
-- [ ] 重叠 `writeScopes` 的并行分配被拒绝；`telemetry` 模式能阻止单 Agent 越界，`aggregate` 模式能阻止活动范围并集之外的修改，严格模式在无遥测时自动串行；
+- [ ] 重叠 `writeScopes` 的并行分配被拒绝；`telemetry` 模式能阻止单 Agent 越界，`aggregate` 模式能阻止活动范围并集之外的修改，无遥测时 `auto` 默认为 `serial` 串行写租约；
 - [ ] 奶能获取版本化验收清单并通过 `criterionId` 逐项提交报告；
 - [ ] 遗漏任一必需标准、重复标准或无理由 N/A 的 `pass` 报告被拒绝；
 - [ ] 未验收时 `party_finish` 被拒绝；

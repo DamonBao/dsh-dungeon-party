@@ -104,13 +104,14 @@ describe('dungeon configuration', () => {
     expect(resolveDungeonConfig({})).toMatchObject({
       maxConcurrentDps: 3,
       maxRepairRounds: 3,
+      maxExecutionRetries: 3,
       battleResCharges: 1,
       commanderBattleResCharges: 1,
       taskLeaseDurationMs: 600_000,
       maxMissedCheckpoints: 2,
       validationRequired: true,
       scopeEnforcementMode: 'auto',
-      effectiveScopeEnforcementMode: 'aggregate',
+      effectiveScopeEnforcementMode: 'serial',
     })
   })
 

@@ -126,6 +126,7 @@ export const taskRecordSchema = {
     quarantinedFiles: stringArray,
     quarantineReviewed: { type: 'boolean' },
     repairRound: { type: 'integer', required: true },
+    executionRetries: { type: 'integer', required: true },
     executionReports: { type: 'array', items: executionReport, required: true },
   },
 } as const
@@ -217,6 +218,8 @@ const verificationRunSummary = {
   properties: {
     command: { type: 'string', required: true },
     exitCode: { type: 'number' },
+    errorCode: { type: 'string' },
+    errorMessage: { type: 'string' },
     durationMs: { type: 'number', required: true },
     beganAt: { type: 'string', required: true },
     outputExcerpt: { type: 'string' },
@@ -502,6 +505,8 @@ const verificationCommand = {
   properties: {
     command: { type: 'string', required: true },
     exitCode: { type: 'number' },
+    errorCode: { type: 'string' },
+    errorMessage: { type: 'string' },
     durationMs: { type: 'number', required: true },
     outputExcerpt: { type: 'string', required: true },
     beganAt: { type: 'string', required: true },

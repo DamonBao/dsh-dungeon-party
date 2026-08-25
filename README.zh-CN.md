@@ -13,7 +13,7 @@
 <p align="center">
   <a href="https://github.com/DamonBao/dsh-dungeon-party/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/DamonBao/dsh-dungeon-party/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://www.npmjs.com/package/@jcy2387/dsh-dungeon-party"><img alt="npm" src="https://img.shields.io/npm/v/@jcy2387/dsh-dungeon-party"></a>
-  <img alt="Node.js 22+" src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white">
+  <img alt="Node.js 22.5+" src="https://img.shields.io/badge/Node.js-22.5%2B-339933?logo=node.js&logoColor=white">
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white">
 </p>
 
@@ -33,7 +33,7 @@ Dungeon Party 在模型之外增加了一层由服务强制执行的协作协议
 - **有界并发**：DPS 并发有上限；CPU 密集型工作区扫描进入 FIFO Worker 池。
 - **独立验收**：Healer 针对版本化 Manifest 和当前 Workspace Fingerprint 验证结果。
 - **持久化恢复**：Checkpoint、停滞、打断、隔离审查、DPS 战复与 Commander 救援都写入事件日志。
-- **显式工具契约**：26 个模型工具全部使用封闭、结构化的输入输出 Schema，不包含泛化 JSON Schema。
+- **显式工具契约**：27 个模型工具全部使用封闭、结构化的输入输出 Schema，不包含泛化 JSON Schema。
 
 ## 队伍组成
 
@@ -67,7 +67,7 @@ FORMING → PLANNING → PLAN_REVIEW → EXECUTING → VALIDATING → COMPLETED
 
 ```text
 ┌──────────────────── DSH Session / Commander ────────────────────┐
-│  26 个结构化工具                                                  │
+│  27 个结构化工具                                                  │
 │        │                                                         │
 │        ▼                                                         │
 │  DungeonService ── 事件日志 ──► Session Projection ──► Web UI    │
@@ -230,9 +230,9 @@ preset/dungeon-party/                       内置 Agent 预设
 仓库包含两个 GitHub Actions 工作流：
 
 - **CI**：在推送到 `main`、Pull Request 和手动触发时运行。它会通过 `npm ci` 安装依赖，执行类型检查和测试，重新构建包，确认仓库内提交的 `lib/` 产物没有过期，并把打包后的 `.tgz` 上传为工作流 Artifact。
-- **Release**：发布 GitHub Release 时运行。Release Tag 必须与 `v<package.json version>` 一致；工作流会重复全部质量门禁，携带 Provenance 发布 npm 包，并把同一个 `.tgz` 附加到 GitHub Release。
+- **Release**：发布 GitHub Release 时运行。Release Tag 必须与 `v<package.json version>` 一致；工作流会重复全部质量门禁，并通过 **OIDC 可信发布（trusted publishing）** 携带 Provenance 发布 npm 包，无需任何长期有效的 token。
 
-要启用 npm 发布，请在 GitHub 仓库的 Actions Secrets 中添加名为 `NPM_TOKEN` 的 Secret，并授予它发布 `@jcy2387/dsh-dungeon-party` 的权限。典型发布流程：
+要启用 npm 发布，请在 npmjs.com 上为 `@jcy2387/dsh-dungeon-party` 配置 [trusted publishing](https://docs.npmjs.com/trusted-publishing)，授权本仓库的 `Release` 工作流——**不需要**配置 `NPM_TOKEN`。典型发布流程：
 
 ```bash
 npm version patch --no-git-tag-version
@@ -244,7 +244,7 @@ git tag "v$VERSION"
 git push origin main --tags
 ```
 
-随后为该 Tag 创建并发布 GitHub Release。相同 npm 版本重复运行时会安全跳过 npm publish；Release 附件会通过 `--clobber` 更新。
+随后为该 Tag 创建并发布 GitHub Release。工作流是幂等的：相同 npm 版本重复运行时会安全跳过 npm publish。Release 附件不再上传到 GitHub Release（npm + provenance 是唯一分发渠道）。
 
 Dependabot 每周检查 npm 和 GitHub Actions 依赖更新。
 

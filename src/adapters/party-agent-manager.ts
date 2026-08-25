@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { matchesGlob, relative, resolve } from 'node:path'
+import { existsSync, lstatSync, realpathSync } from 'node:fs'
+import { dirname, isAbsolute, matchesGlob, relative, resolve } from 'node:path'
 import type { Agent, AgentHandle, AgentRegistry } from '@deepseek-ai/dsh-agent'
 import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -50,7 +51,13 @@ export class PartyAgentManager {
   private readonly handles = new Map<string, AgentHandle>()
   private readonly commanderHandles = new Map<string, AgentHandle>()
   private readonly dispatchedRecoveryIds = new Set<string>()
-  private readonly leaseAudits = new Map<string, { leaseId: string; snapshot: WorkspaceSnapshot }>()
+  /**
+   * Per-task workspace audit state. `snapshot` is the rolling baseline and
+   * `accumulated` keeps every change observed across checkpoint re-baselines,
+   * so a checkpoint can never silently absorb pre-existing (or out-of-scope)
+   * modifications before the final submit audit.
+   */
+  private readonly leaseAudits = new Map<string, { leaseId: string; snapshot: WorkspaceSnapshot; accumulated: Set<string> }>()
   private readonly pending = new Map<string, Promise<string>>()
   /** Serializes dispatch per run so concurrent kicks cannot double-assign. */
   private readonly dispatchLocks = new Map<string, Promise<unknown>>()
@@ -58,10 +65,17 @@ export class PartyAgentManager {
   private readonly workspaceAuditLocks = new Map<string, Promise<unknown>>()
   /** Rate-limits dangling-lease turn-end nudges per session. */
   private readonly turnEndNudges = new Map<string, number>()
+  /** Rate-limits redispatch of assigned-but-unclaimed tasks per run/task. */
+  private readonly redispatchAt = new Map<string, number>()
   /** Last taskSetVersion per run for which a drained-execution notice fired. */
   private readonly drainNoticeTaskSetVersions = new Map<string, number>()
-  /** Agent contexts that already carry the execution guard. */
+  /** Agent contexts that already carry the execution guard listener. */
   private readonly guardedContexts = new WeakSet<Context>()
+  /**
+   * Current run/slot binding per guarded context. The installed listener reads
+   * this live so a context reused across runs never keeps a stale guard.
+   */
+  private readonly guardBindings = new WeakMap<Context, { runId: string; slot: DpsSlot }>()
   /** Unexpected scheduler errors, kept for diagnostics instead of failing post-commit flows. */
   readonly schedulerErrors: unknown[] = []
 
@@ -86,6 +100,9 @@ export class PartyAgentManager {
     for (const slot of ['dps-1', 'dps-2', 'dps-3', 'healer'] as const) {
       if (run.slots[slot].currentSessionId) await this.ensureMember(actor, runId, slot)
     }
+    // Recovered leases lost their in-memory audit baselines on restart;
+    // rebuild them so in-flight tasks can submit again.
+    await this.rebuildMissingLeaseAudits(runId).catch(() => undefined)
   }
 
   async prepareForPhase(actor: Actor, runId: string, phase: RunPhase): Promise<void> {
@@ -164,6 +181,33 @@ export class PartyAgentManager {
       if (revoked.length > 0) {
         await this.dispatchAvailableTasks(tankActor, runId).catch(() => undefined)
         continue
+      }
+
+      // After a host restart, in-memory lease audit baselines are gone while
+      // leases recovered from the event log are still active. Re-baseline so
+      // those tasks can submit again; changes made from this point onward
+      // stay fully audited.
+      const missingAudit = Object.values(swept.tasks).some((task) =>
+        task.activeLease && task.ownerSlot && !this.leaseAudits.has(`${runId}:${task.workOrder.id}`),
+      )
+      if (missingAudit) await this.rebuildMissingLeaseAudits(runId).catch(() => undefined)
+
+      // Assigned but never (or no longer) dispatched work is invisible to
+      // the ordinary scheduler pass, which only sees ownerless tasks.
+      // Redispatch to the owner at most once every five minutes per task.
+      for (const task of Object.values(swept.tasks)) {
+        if (task.status !== 'ready' || !task.ownerSlot || task.activeLease) continue
+        const ownerBinding = swept.slots[task.ownerSlot]
+        if (!ownerBinding.currentSessionId || ownerBinding.lifeState !== 'alive') continue
+        const redispatchKey = `${runId}:${task.workOrder.id}`
+        const nowMs = Date.now()
+        if (nowMs < (this.redispatchAt.get(redispatchKey) ?? 0)) continue
+        this.redispatchAt.set(redispatchKey, nowMs + 5 * 60_000)
+        try {
+          this.dispatchTask(tankActor, runId, task.workOrder.id)
+        } catch {
+          // The owner agent may not be live yet; the next pass retries.
+        }
       }
 
       for (const task of Object.values(swept.tasks)) {
@@ -252,10 +296,20 @@ export class PartyAgentManager {
     const assigned: string[] = []
     const run = this.service.getRunForActor(actor, runId)
     if (run.phase !== 'EXECUTING' && run.phase !== 'REPAIR') return assigned
+    // A slot is busy as soon as it owns a ready (assigned but unclaimed) OR
+    // running task; counting only running lets a second kick double-assign a
+    // DPS whose first claim is still pending.
     const busySlots = new Set(Object.values(run.tasks)
-      .filter((task) => task.status === 'running' && task.ownerSlot)
+      .filter((task) => task.ownerSlot && (task.status === 'ready' || task.status === 'running'))
       .map((task) => task.ownerSlot))
-    const freeSlots = (['dps-1', 'dps-2', 'dps-3'] as const).filter((slot) => !busySlots.has(slot))
+    const freeSlots = (['dps-1', 'dps-2', 'dps-3'] as const).filter((slot) => {
+      if (busySlots.has(slot)) return false
+      const binding = run.slots[slot]
+      // A bound-but-down slot must be recovered, not handed new work; unbound
+      // slots stay eligible so the scheduler can create members for them.
+      if (!binding.currentSessionId) return true
+      return binding.lifeState === 'alive'
+    })
     const priority = { critical: 0, high: 1, normal: 2, low: 3 } as const
     const readyTasks = Object.values(run.tasks)
       .filter((task) => ['pending', 'ready'].includes(task.status) && !task.ownerSlot)
@@ -271,7 +325,11 @@ export class PartyAgentManager {
         this.dispatchTask(actor, runId, task.workOrder.id)
         assigned.push(task.workOrder.id)
       } catch (error) {
-        if (error instanceof DungeonError && ['SCOPE_OVERLAP', 'MAX_CONCURRENCY', 'TASK_NOT_READY', 'TASK_NOT_ASSIGNABLE', 'UNMET_DEPENDENCY'].includes(error.code)) {
+        if (error instanceof DungeonError) {
+          // Expected domain refusals (unmet dependency, slot busy, member not
+          // live, agent unavailable, …) must not abort the whole dispatch
+          // pass: record them for diagnostics and continue with other tasks.
+          this.schedulerErrors.push(error)
           freeSlots.unshift(slot)
           continue
         }
@@ -623,6 +681,29 @@ export class PartyAgentManager {
     this.leaseAudits.set(`${runId}:${taskId}`, {
       leaseId,
       snapshot: await workspaceComputationQueue.snapshot(run.workspaceRoot, this.service.getFingerprintIgnoreScopes()),
+      accumulated: new Set(),
+    })
+  }
+
+  /**
+   * Rebuild audit baselines for active leases that lost their in-memory
+   * baseline (typically after a host restart). Changes made before the
+   * rebuild are not attributable anymore; everything after is fully audited.
+   */
+  async rebuildMissingLeaseAudits(runId: string): Promise<void> {
+    await this.withWorkspaceAuditLock(runId, async () => {
+      const run = this.service.getRun(runId)
+      if (run.phase !== 'EXECUTING' && run.phase !== 'REPAIR') return
+      for (const task of Object.values(run.tasks)) {
+        if (!task.activeLease || !task.ownerSlot) continue
+        const key = `${runId}:${task.workOrder.id}`
+        if (this.leaseAudits.has(key)) continue
+        this.leaseAudits.set(key, {
+          leaseId: task.activeLease.leaseId,
+          snapshot: await workspaceComputationQueue.snapshot(run.workspaceRoot, this.service.getFingerprintIgnoreScopes()),
+          accumulated: new Set(),
+        })
+      }
     })
   }
 
@@ -633,7 +714,10 @@ export class PartyAgentManager {
       throw new DungeonError('WORKSPACE_AUDIT_MISSING', 'The active lease has no host workspace baseline')
     }
     const current = await workspaceComputationQueue.snapshot(run.workspaceRoot, this.service.getFingerprintIgnoreScopes())
-    const changedFiles = diffWorkspaceSnapshots(audit.snapshot, current)
+    // Union of everything observed since lease start: earlier checkpoint
+    // re-baselines moved their deltas into `accumulated`, so pre-checkpoint
+    // (and out-of-scope) changes can no longer be silently absorbed.
+    const changedFiles = [...new Set([...audit.accumulated, ...diffWorkspaceSnapshots(audit.snapshot, current)])].sort()
     const activeScopes = Object.values(run.tasks).flatMap((task) => task.activeLease ? task.workOrder.writeScopes : [])
     const outsideActiveScopes = changedFiles.filter((path) =>
       !activeScopes.some((scope) => path === scope || matchesGlob(path, scope)),
@@ -660,9 +744,10 @@ export class PartyAgentManager {
   }
 
   /**
-   * Re-baseline the workspace audit for an active lease. Called when a
-   * checkpoint renews the lease so pre-existing external noise no longer
-   * blocks the eventual work_submit.
+   * Re-baseline the workspace audit for an active lease after a checkpoint
+   * renewed it. The delta since the previous baseline is accumulated first,
+   * so the final submit audit still sees every change made across the whole
+   * lease instead of only the slice after the last checkpoint.
    */
   async refreshLeaseAudit(runId: string, taskId: string): Promise<void> {
     await this.withWorkspaceAuditLock(runId, async () => {
@@ -671,7 +756,9 @@ export class PartyAgentManager {
       const run = this.service.getRun(runId)
       const task = run.tasks[taskId]
       if (!task?.activeLease || task.activeLease.leaseId !== audit.leaseId) return
-      audit.snapshot = await workspaceComputationQueue.snapshot(run.workspaceRoot, this.service.getFingerprintIgnoreScopes())
+      const next = await workspaceComputationQueue.snapshot(run.workspaceRoot, this.service.getFingerprintIgnoreScopes())
+      for (const path of diffWorkspaceSnapshots(audit.snapshot, next)) audit.accumulated.add(path)
+      audit.snapshot = next
     })
   }
 
@@ -775,6 +862,9 @@ export class PartyAgentManager {
     for (const key of this.leaseAudits.keys()) {
       if (key.startsWith(prefix)) this.leaseAudits.delete(key)
     }
+    for (const key of this.redispatchAt.keys()) {
+      if (key.startsWith(prefix)) this.redispatchAt.delete(key)
+    }
     this.drainNoticeTaskSetVersions.delete(runId)
     this.workspaceAuditLocks.delete(runId)
     const commanderHandle = this.commanderHandles.get(runId)
@@ -791,22 +881,29 @@ export class PartyAgentManager {
     this.commanderHandles.clear()
     this.leaseAudits.clear()
     this.workspaceAuditLocks.clear()
+    this.redispatchAt.clear()
     this.drainNoticeTaskSetVersions.clear()
     await Promise.all(handles.map((handle) => handle.dispose()))
   }
 
-  /** Installs the execution guard at most once per agent context. */
+  /**
+   * Install the execution guard at most once per agent context while keeping
+   * the run/slot binding fresh: a context reused across runs reads the
+   * current binding from the WeakMap instead of a stale closure.
+   */
   private ensureGuardInstalled(agentCtx: Context, runId: string, slot: ChildSlot): void {
     if (slot === 'healer') return
+    this.guardBindings.set(agentCtx, { runId, slot: slot as DpsSlot })
     if (this.guardedContexts.has(agentCtx)) return
     this.guardedContexts.add(agentCtx)
-    this.installExecutionGuard(agentCtx, runId, slot)
+    this.installExecutionGuard(agentCtx)
   }
 
-  private installExecutionGuard(agentCtx: Context, runId: string, slot: DpsSlot): void {
+  private installExecutionGuard(agentCtx: Context): void {
     agentCtx.on('tools/pre-execute', async (exec, next) => {
       if (exec.name !== 'write' && exec.name !== 'edit' && exec.name !== 'bash') return next()
-      const guard = this.service.getExecutionGuardView(runId, slot)
+      const binding = this.guardBindings.get(agentCtx)
+      const guard = binding ? this.service.getExecutionGuardView(binding.runId, binding.slot) : undefined
       if (!guard) {
         return {
           kind: 'deny',
@@ -820,9 +917,16 @@ export class PartyAgentManager {
         const root = resolve(guard.workspaceRoot)
         const absolutePath = resolve(root, suppliedPath)
         const workspacePath = relative(root, absolutePath).replaceAll('\\', '/')
-        const allowed = workspacePath && !workspacePath.startsWith('../') &&
+        const allowed = workspacePath && !workspacePath.startsWith('../') && !isAbsolute(workspacePath) &&
           guard.writeScopes.some((scope) => workspacePath === scope || matchesGlob(workspacePath, scope))
         if (!allowed) return { kind: 'deny', reason: `Path ${suppliedPath} is outside the active task writeScopes.` }
+        const escape = findSymlinkEscape(root, absolutePath)
+        if (escape) {
+          return {
+            kind: 'deny',
+            reason: `Path ${suppliedPath} escapes the workspace through a symlink (${escape}); writes must target regular files inside the workspace.`,
+          }
+        }
       } else {
         const command = typeof args.command === 'string' ? args.command.trim().replace(/\s+/g, ' ') : ''
         // Preventive interception for git commands that rewrite workspace
@@ -834,6 +938,17 @@ export class PartyAgentManager {
           return {
             kind: 'deny',
             reason: `Destructive git command denied: ${command}. It rewrites workspace content that the scope audit can only detect after the fact. Use non-destructive git (status/log/diff/add/commit) instead.`,
+          }
+        }
+        // Shell-level write interception. Regular expressions cannot parse
+        // shell, so this is a deny-list of the common write primitives that
+        // bypass the scope-checked write/edit tools; real isolation still
+        // needs an OS/DSH capability sandbox (see review P0-02).
+        const intercepted = BASH_WRITE_INTERCEPTS.find(({ pattern }) => pattern.test(command))
+        if (intercepted) {
+          return {
+            kind: 'deny',
+            reason: `Denied under a dungeon lease: ${intercepted.reason} (${command}). Perform file changes through the scope-checked write/edit tools instead of the shell.`,
           }
         }
         const isGlobal = /^(?:npm|pnpm|yarn|bun)\s+(?:install|add|remove|uninstall|update|upgrade)\b/i.test(command) ||
@@ -947,4 +1062,65 @@ export class PartyAgentManager {
 
 function keyFor(runId: string, slot: ChildSlot): string {
   return `${runId}:${slot}`
+}
+
+/**
+ * Shell constructs that can write files without going through the
+ * scope-checked write/edit tools. This is a conservative deny-list, not a
+ * shell parser: false positives (a denied exotic-but-safe command) are far
+ * cheaper than cross-task writes. Matches are reported with a reason so the
+ * model can rephrase through the file tools.
+ */
+const BASH_WRITE_INTERCEPTS: Array<{ pattern: RegExp; reason: string }> = [
+  { pattern: /(?:^|[;&|(\s])\d*>{1,2}/, reason: 'output redirection' },
+  { pattern: /\btee\b/, reason: 'tee' },
+  { pattern: /\bsed\b(?=[^|;&]*[ \t]-i(?:[ \t=]|$))/, reason: 'sed in-place edit' },
+  { pattern: /(?:^|[;&|(\s])(?:cp|mv|rm|rsync|dd|truncate|chmod|chown|install|mkfifo|shred)\s/, reason: 'filesystem mutation command' },
+  { pattern: /\b(?:node|nodejs|deno|bun)\b[^\n;&|]*[ \t](?:-e|--eval|-p|--print)\b/, reason: 'node one-liner execution' },
+  { pattern: /\bpython[0-9.]*\b[^\n;&|]*[ \t]-c\b/, reason: 'python one-liner execution' },
+  { pattern: /\b(?:ruby|perl)\b[^\n;&|]*[ \t]-e\b/, reason: 'interpreter one-liner execution' },
+  { pattern: /(?:^|[;&|(\s])(?:bash|sh|zsh|dash)[ \t]+-c\b/, reason: 'nested shell execution' },
+  { pattern: /(?:^|[;&|(\s])eval\b/, reason: 'shell eval' },
+]
+
+/**
+ * Best-effort detection of a write target escaping the workspace through
+ * symlinks. The target itself must not be a symlink (no-follow semantics),
+ * and the deepest existing ancestor must resolve inside the real root.
+ * Returns a short diagnostic when the path escapes; undefined when
+ * containment holds or cannot be determined (IO failures fall back to the
+ * lexical scope check already performed by the caller).
+ */
+function findSymlinkEscape(root: string, absolutePath: string): string | undefined {
+  try {
+    const rootReal = realpathSync(root)
+    const contained = (candidate: string): boolean => {
+      const rel = relative(rootReal, candidate)
+      return rel === '' || (rel !== '..' && !rel.startsWith('..') && !isAbsolute(rel))
+    }
+    let anchor = absolutePath
+    while (!existsSync(anchor)) {
+      const parent = dirname(anchor)
+      if (parent === anchor) break
+      anchor = parent
+    }
+    if (!contained(realpathSync(anchor))) return `${anchor} -> ${realpathSync(anchor)}`
+    if (existsSync(absolutePath)) {
+      const targetReal = realpathSync(absolutePath)
+      if (!contained(targetReal)) return `${absolutePath} -> ${targetReal}`
+    } else {
+      try {
+        // existsSync follows links, so a dangling symlink reports false yet
+        // still redirects creation to its (possibly external) target.
+        if (lstatSync(absolutePath).isSymbolicLink()) {
+          return `${absolutePath} is a symlink (no-follow write policy)`
+        }
+      } catch {
+        // Target absent and not a symlink: creation stays inside the anchor.
+      }
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
 }

@@ -13,7 +13,7 @@
 <p align="center">
   <a href="https://github.com/DamonBao/dsh-dungeon-party/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/DamonBao/dsh-dungeon-party/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://www.npmjs.com/package/@jcy2387/dsh-dungeon-party"><img alt="npm" src="https://img.shields.io/npm/v/@jcy2387/dsh-dungeon-party"></a>
-  <img alt="Node.js 22+" src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white">
+  <img alt="Node.js 22.5+" src="https://img.shields.io/badge/Node.js-22.5%2B-339933?logo=node.js&logoColor=white">
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white">
 </p>
 
@@ -33,7 +33,7 @@ Dungeon Party provides a service-enforced coordination layer:
 - **Bounded concurrency** — DPS concurrency is capped; CPU-heavy workspace scans use a FIFO Worker pool.
 - **Independent acceptance** — the Healer validates a versioned manifest and workspace fingerprint.
 - **Durable recovery** — checkpoints, stalls, interrupts, quarantine review, battle resurrection, and Commander rescue are persisted as events.
-- **Auditable tools** — all 26 model tools use explicit closed input/output schemas; there are no generic JSON tool schemas.
+- **Auditable tools** — all 27 model tools use explicit closed input/output schemas; there are no generic JSON tool schemas.
 
 ## Party Composition
 
@@ -67,7 +67,7 @@ FORMING → PLANNING → PLAN_REVIEW → EXECUTING → VALIDATING → COMPLETED
 
 ```text
 ┌──────────────────── DSH Session / Commander ────────────────────┐
-│  26 structured tools                                             │
+│  27 structured tools                                             │
 │        │                                                         │
 │        ▼                                                         │
 │  DungeonService ── event log ──► Session projection ──► Web UI   │
@@ -230,9 +230,9 @@ preset/dungeon-party/                       bundled agent preset
 The repository includes two GitHub Actions workflows:
 
 - **CI** — runs on pushes to `main`, pull requests, and manual dispatch. It installs with `npm ci`, type-checks, tests, rebuilds the package, verifies that committed `lib/` artifacts are current, and uploads the packed `.tgz` as a workflow artifact.
-- **Release** — runs when a GitHub Release is published. It requires a release tag matching `v<package.json version>`, repeats all quality gates, publishes the package to npm with provenance, and attaches the same `.tgz` to the GitHub Release.
+- **Release** — runs when a GitHub Release is published. It requires a release tag matching `v<package.json version>`, repeats all quality gates, and publishes the package to npm with provenance via **OIDC trusted publishing** (no long-lived token secret).
 
-To enable npm publishing, add an Actions repository secret named `NPM_TOKEN` with publish access to `@jcy2387/dsh-dungeon-party`. A typical release is:
+To enable npm publishing, configure [trusted publishing](https://docs.npmjs.com/trusted-publishing) on npmjs.com for `@jcy2387/dsh-dungeon-party`, authorizing the `Release` workflow of this repository — no `NPM_TOKEN` secret is needed. A typical release is:
 
 ```bash
 npm version patch --no-git-tag-version
@@ -244,7 +244,7 @@ git tag "v$VERSION"
 git push origin main --tags
 ```
 
-Then create and publish a GitHub Release for that tag. The workflow is idempotent for an npm version that is already published, while the release asset is replaced with `--clobber` on reruns.
+Then create and publish a GitHub Release for that tag. The workflow is idempotent: if the npm version is already published, the publish step is skipped. Release artifacts are no longer uploaded to the GitHub Release (npm with provenance is the single distribution channel).
 
 Dependabot checks npm and GitHub Actions dependencies weekly.
 

@@ -1,3 +1,5 @@
+> **状态（2026-08-24 标注）**：本报告基于更早代码快照，行号与部分结论已失效；请以 `reviews/full-stack-review-2026-08-24.md` 为准。其中的 P0/P1 项已在后续修复中落地并补充回归测试。
+
 # 工具协议层与宿主集成评审报告
 
 > 评审范围：`src/tools/register.ts`、`src/plugin.ts`、`src/preset-sync.ts`、`src/session-event-compat.ts`、`src/adapters/session-event-store.ts`、`src/adapters/workspace-fingerprint.ts`  

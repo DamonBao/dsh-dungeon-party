@@ -109,6 +109,7 @@ interface TaskRecord {
   quarantinedFiles?: string[];
   quarantineReviewed?: boolean;
   repairRound: number;
+  executionRetries: number;
   executionReports: ExecutionReport[];
 }
 interface SlotBinding {
@@ -238,6 +239,9 @@ interface CommanderCheckpoint {
 interface VerificationCommandRun {
   command: string;
   exitCode?: number;
+  /** Spawn failure marker (e.g. ENOENT): the command never ran to completion. */
+  errorCode?: string;
+  errorMessage?: string;
   durationMs: number;
   outputExcerpt: string;
   beganAt: string;
