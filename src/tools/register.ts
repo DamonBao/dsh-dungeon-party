@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
+import { realpathSync, statSync } from 'node:fs'
+import { isAbsolute, relative, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import {
   defineTool,
@@ -139,7 +141,8 @@ function summarizeRun(run: DungeonRun) {
     commanderBattleResChargesRemaining: run.commanderBattleResChargesRemaining,
     validationReportCount: run.validationReports.length,
     verificationRuns: run.verificationRuns.slice(-8).map((item) => ({
-      command: item.command, exitCode: item.exitCode, durationMs: item.durationMs, beganAt: item.beganAt,
+      command: item.command, exitCode: item.exitCode, errorCode: item.errorCode,
+      errorMessage: boundedText(item.errorMessage, 200), durationMs: item.durationMs, beganAt: item.beganAt,
       outputExcerpt: boundedText(item.outputExcerpt, 600),
     })),
     resultSummary: boundedText(run.resultSummary, 500),
@@ -320,6 +323,7 @@ const toolOutputs = {
   party_health: healthOutput,
   party_assign: assignmentOutput,
   party_reopen: taskRecordOutput,
+  party_retry: taskRecordOutput,
   party_direct_recovery: recoveryInstructionOutput,
   party_request_checkpoint: checkpointRequestOutput,
   party_interrupt: taskRecordOutput,
@@ -379,25 +383,81 @@ function appendBoundedOutput(current: string, chunk: Buffer, limit = 16_000): st
 }
 
 function excerpt(head: string, tail: string, limit = 4000): string {
-  const text = `${head}${head && tail ? '\\n' : ''}${tail}`
+  const text = `${head}${head && tail ? '\n' : ''}${tail}`
   if (text.length <= limit) return text
   const headLimit = Math.floor(limit * 0.6)
-  return `${text.slice(0, headLimit)}\\n…\\n${text.slice(-Math.max(0, limit - headLimit - 3))}`
+  return `${text.slice(0, headLimit)}\n…\n${text.slice(-Math.max(0, limit - headLimit - 3))}`
 }
 
-async function runVerification(command: string, timeoutMs: number, cwd: string): Promise<{ exitCode?: number; outputExcerpt: string; durationMs: number; timedOut: boolean }> {
-  const parts = command.trim().split(/\\s+/)
+/**
+ * Structured verification attempt result. Spawn failures and timeouts are
+ * first-class outcomes so a command that never executed can never be
+ * persisted as a normal (let alone passing) verification record.
+ */
+export interface VerificationAttempt {
+  outcome: 'completed' | 'timeout' | 'spawn-error'
+  exitCode?: number
+  errorCode?: string
+  errorMessage?: string
+  outputExcerpt: string
+  durationMs: number
+}
+
+export async function runVerification(command: string, timeoutMs: number, cwd: string): Promise<VerificationAttempt> {
+  // Allowlist entries are plain argv strings; split on real whitespace.
+  const parts = command.trim().split(/\s+/)
   const started = Date.now()
-  return await new Promise((resolve) => {
-    const child = spawn(parts[0]!, parts.slice(1), { cwd, shell: false })
+  return await new Promise((resolveAttempt) => {
+    let settled = false
+    const finish = (attempt: VerificationAttempt): void => {
+      if (!settled) {
+        settled = true
+        resolveAttempt(attempt)
+      }
+    }
     let stdout = ''
     let stderr = ''
     let timedOut = false
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM') }, timeoutMs)
-    child.stdout?.on('data', (chunk: Buffer) => { stdout = appendBoundedOutput(stdout, chunk) })
-    child.stderr?.on('data', (chunk: Buffer) => { stderr = appendBoundedOutput(stderr, chunk) })
-    child.on('close', (code) => { clearTimeout(timer); resolve({ ...(code === null ? {} : { exitCode: code }), outputExcerpt: excerpt(stdout, stderr), durationMs: Date.now() - started, timedOut }) })
-    child.on('error', () => { clearTimeout(timer); resolve({ outputExcerpt: excerpt(stdout, stderr), durationMs: Date.now() - started, timedOut }) })
+    let killTimer: ReturnType<typeof setTimeout> | undefined
+    const child = spawn(parts[0]!, parts.slice(1), { cwd, shell: false })
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill('SIGTERM')
+      // Escalate when SIGTERM is ignored so a hung verification cannot hold
+      // the slot forever.
+      killTimer = setTimeout(() => {
+        child.kill('SIGKILL')
+      }, 5_000)
+      killTimer.unref?.()
+    }, timeoutMs)
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout = appendBoundedOutput(stdout, chunk)
+    })
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr = appendBoundedOutput(stderr, chunk)
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      if (killTimer) clearTimeout(killTimer)
+      const outputExcerpt = excerpt(stdout, stderr)
+      const durationMs = Date.now() - started
+      if (timedOut) {
+        finish({ outcome: 'timeout', outputExcerpt, durationMs })
+      } else {
+        finish({ outcome: 'completed', ...(code === null ? {} : { exitCode: code }), outputExcerpt, durationMs })
+      }
+    })
+    child.on('error', (error) => {
+      clearTimeout(timer)
+      if (killTimer) clearTimeout(killTimer)
+      finish({
+        outcome: 'spawn-error',
+        errorCode: (error as NodeJS.ErrnoException).code ?? 'SPAWN_ERROR',
+        errorMessage: error.message,
+        outputExcerpt: excerpt(stdout, stderr),
+        durationMs: Date.now() - started,
+      })
+    })
   })
 }
 
@@ -418,14 +478,52 @@ export function registerDungeonTools(
       },
       async execute(args, exec) {
         const caller = actor(exec)
+        // P0 hardening: the workspace root must exist, be a directory, and
+        // stay inside the calling session's authorized cwd so a model cannot
+        // point the whole party (and its recursive fingerprint scans) at an
+        // arbitrary host directory.
+        const suppliedRoot = typeof args.workspaceRoot === 'string' ? args.workspaceRoot.trim() : ''
+        if (!suppliedRoot) throw new DungeonError('INVALID_ARGS', 'workspaceRoot is required')
+        let canonicalRoot: string
+        try {
+          canonicalRoot = realpathSync(resolve(suppliedRoot))
+        } catch {
+          throw new DungeonError('WORKSPACE_ROOT_NOT_FOUND', `workspaceRoot does not exist or is not accessible: ${suppliedRoot}`)
+        }
+        try {
+          if (!statSync(canonicalRoot).isDirectory()) {
+            throw new DungeonError('WORKSPACE_ROOT_NOT_DIRECTORY', `workspaceRoot is not a directory: ${suppliedRoot}`)
+          }
+        } catch (error) {
+          if (error instanceof DungeonError) throw error
+          throw new DungeonError('WORKSPACE_ROOT_NOT_FOUND', `workspaceRoot cannot be read: ${suppliedRoot}`)
+        }
+        const sessionCwd = (exec.agent?.session as { header?: { cwd?: string } } | undefined)?.header?.cwd
+        if (typeof sessionCwd === 'string' && sessionCwd.trim()) {
+          let cwdReal: string | undefined
+          try {
+            cwdReal = realpathSync(sessionCwd)
+          } catch {
+            cwdReal = undefined
+          }
+          if (cwdReal) {
+            const relation = relative(cwdReal, canonicalRoot)
+            if (relation === '..' || relation.startsWith('../') || isAbsolute(relation)) {
+              throw new DungeonError(
+                'WORKSPACE_ROOT_FORBIDDEN',
+                `workspaceRoot must stay inside the session workspace (${cwdReal}); refusing ${canonicalRoot}`,
+              )
+            }
+          }
+        }
         const workspaceFingerprint = await workspaceComputationQueue.fingerprint(
-          args.workspaceRoot,
+          canonicalRoot,
           service.getFingerprintIgnoreScopes(),
         )
         return canonical(summarizeRun(service.startRun({
           ...(args.runId ? { runId: args.runId } : {}),
           objective: args.objective,
-          workspaceRoot: args.workspaceRoot,
+          workspaceRoot: canonicalRoot,
           workspaceFingerprint,
           tankSessionId: caller.sessionId,
         })))
@@ -613,6 +711,21 @@ export function registerDungeonTools(
       },
       async execute(args, exec) {
         return canonical(service.reopenTask(actor(exec), args.runId, args.taskId, args.findingIds))
+      },
+    })),
+    ctx.tools.register(defineDungeonTool({
+      name: 'party_retry',
+      description: 'As tank, send a blocked or failed task back to the schedulable pool with an auditable reason; bounded by the execution retry limit. Use it when execution itself failed (no validation report exists yet); use party_reopen for validation findings.',
+      parameters: {
+        runId: { type: 'string', required: true },
+        taskId: { type: 'string', required: true },
+        reason: { type: 'string', required: true },
+      },
+      async execute(args, exec) {
+        const caller = actor(exec)
+        const task = service.retryExecution(caller, args.runId, args.taskId, args.reason)
+        await agentManager?.kickScheduler(args.runId)
+        return canonical(task)
       },
     })),
     ctx.tools.register(defineDungeonTool({
@@ -828,11 +941,19 @@ export function registerDungeonTools(
         const limit = verificationTimeout(service)
         const requested = args.timeoutMs ?? limit
         if (!Number.isInteger(requested) || requested < 1 || requested > limit) throw new DungeonError('INVALID_ARGS', `timeoutMs must be a positive integer <= ${limit}`)
-        const result = await runVerification(args.command, requested, run.workspaceRoot)
-        if (result.timedOut) return canonical({ code: 'VERIFICATION_TIMEOUT', command: args.command, durationMs: result.durationMs, outputExcerpt: result.outputExcerpt })
+        const attempt = await runVerification(args.command, requested, run.workspaceRoot)
+        if (attempt.outcome === 'timeout') return canonical({ code: 'VERIFICATION_TIMEOUT', command: args.command, durationMs: attempt.durationMs, outputExcerpt: attempt.outputExcerpt })
+        // Completed and spawn-failed attempts are both persisted structurally:
+        // a spawn failure carries its errorCode instead of masquerading as a
+        // normal record without an exit code.
         const recorded = service.recordVerificationCommand(caller, args.runId, {
-          command: args.command, ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }), durationMs: result.durationMs,
-          outputExcerpt: result.outputExcerpt, beganAt: new Date(Date.now() - result.durationMs).toISOString(),
+          command: args.command,
+          ...(attempt.exitCode === undefined ? {} : { exitCode: attempt.exitCode }),
+          ...(attempt.errorCode === undefined ? {} : { errorCode: attempt.errorCode }),
+          ...(attempt.errorMessage === undefined ? {} : { errorMessage: attempt.errorMessage }),
+          durationMs: attempt.durationMs,
+          outputExcerpt: attempt.outputExcerpt,
+          beganAt: new Date(Date.now() - attempt.durationMs).toISOString(),
         })
         return canonical(recorded)
       },

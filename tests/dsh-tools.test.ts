@@ -27,7 +27,7 @@ vi.mock('../src/adapters/workspace-computation-queue.js', async (importOriginal)
   }
 })
 
-function setup(agentManager?: Parameters<typeof registerDungeonTools>[2]) {
+function setup(agentManager?: Parameters<typeof registerDungeonTools>[2], config?: ConstructorParameters<typeof DungeonService>[0]['config']) {
   const events: DungeonEvent[] = []
   const service = new DungeonService({
     eventStore: {
@@ -39,6 +39,7 @@ function setup(agentManager?: Parameters<typeof registerDungeonTools>[2]) {
       return () => `id-${++id}`
     })(),
     clock: () => '2025-01-01T00:00:00.000Z',
+    ...(config ? { config } : {}),
   })
   const definitions: ToolDefinition[] = []
   const context = {
@@ -87,6 +88,7 @@ describe('DSH dungeon tools', () => {
       'party_health',
       'party_assign',
       'party_reopen',
+      'party_retry',
       'party_direct_recovery',
       'party_request_checkpoint',
       'party_interrupt',
@@ -593,4 +595,71 @@ describe('two-phase party_finish', () => {
     expect(finished.phase).toBe('COMPLETED')
     expect(service.getRun('run').phase).toBe('COMPLETED')
   })
+})
+
+describe('verification_run real execution', () => {
+  // Regression for P0-01: verification commands must actually run, and a
+  // spawn failure must never persist as a normal-looking record.
+  const healerCommands = [
+    'node --version',
+    'node -p process.exit(3)',
+    'dungeon-no-such-bin --version',
+    'node -e setTimeout(()=>{},30000)',
+  ]
+
+  async function healerRun() {
+    const { service, definitions } = setup(undefined, { healerVerificationCommands: healerCommands })
+    const start = definitions.find((definition) => definition.name === 'party_start')!
+    await start.execute({ runId: 'run', objective: 'Verify commands', workspaceRoot: process.cwd() }, execution('tank'))
+    service.bindMember({ sessionId: 'tank' }, 'run', 'healer', 'session-healer')
+    const verification = definitions.find((definition) => definition.name === 'verification_run')!
+    return { service, verification }
+  }
+
+  it('executes allowlisted commands for real and persists the exit code', async () => {
+    const { service, verification } = await healerRun()
+
+    const recorded = await verification.execute({ runId: 'run', command: 'node --version' }, execution('session-healer')) as Record<string, unknown>
+
+    expect(recorded.exitCode).toBe(0)
+    expect(recorded.errorCode).toBeUndefined()
+    expect(String(recorded.outputExcerpt)).toMatch(/v\d+/)
+    expect(service.getRun('run').verificationRuns.at(-1)).toMatchObject({ command: 'node --version', exitCode: 0 })
+  })
+
+  it('persists non-zero exit codes as structured failures', async () => {
+    const { service, verification } = await healerRun()
+
+    const recorded = await verification.execute({ runId: 'run', command: 'node -p process.exit(3)' }, execution('session-healer')) as Record<string, unknown>
+
+    expect(recorded.exitCode).toBe(3)
+    expect(recorded.errorCode).toBeUndefined()
+    expect(service.getRun('run').verificationRuns.at(-1)?.exitCode).toBe(3)
+  })
+
+  it('records spawn failures with an errorCode instead of a normal-looking record', async () => {
+    const { service, verification } = await healerRun()
+
+    const recorded = await verification.execute({ runId: 'run', command: 'dungeon-no-such-bin --version' }, execution('session-healer')) as Record<string, unknown>
+
+    expect(recorded.errorCode).toBe('ENOENT')
+    expect(recorded.exitCode).toBeUndefined()
+    expect(String(recorded.errorMessage)).toContain('dungeon-no-such-bin')
+    expect(service.getRun('run').verificationRuns.at(-1)).toMatchObject({
+      command: 'dungeon-no-such-bin --version',
+      errorCode: 'ENOENT',
+    })
+  })
+
+  it('times out hung commands without persisting a passing record', async () => {
+    const { service, verification } = await healerRun()
+
+    const result = await verification.execute(
+      { runId: 'run', command: 'node -e setTimeout(()=>{},30000)', timeoutMs: 300 },
+      execution('session-healer'),
+    ) as Record<string, unknown>
+
+    expect(result.code).toBe('VERIFICATION_TIMEOUT')
+    expect(service.getRun('run').verificationRuns).toHaveLength(0)
+  }, 15_000)
 })

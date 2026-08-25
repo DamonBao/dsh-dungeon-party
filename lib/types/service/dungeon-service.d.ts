@@ -107,6 +107,7 @@ export interface TaskRecord {
     quarantinedFiles?: string[];
     quarantineReviewed?: boolean;
     repairRound: number;
+    executionRetries: number;
     executionReports: ExecutionReport[];
 }
 export interface SlotBinding {
@@ -239,6 +240,9 @@ export interface CommanderCheckpoint {
 export interface VerificationCommandRun {
     command: string;
     exitCode?: number;
+    /** Spawn failure marker (e.g. ENOENT): the command never ran to completion. */
+    errorCode?: string;
+    errorMessage?: string;
     durationMs: number;
     outputExcerpt: string;
     beganAt: string;
@@ -246,6 +250,8 @@ export interface VerificationCommandRun {
 export interface VerificationCommandResult {
     command: string;
     exitCode?: number;
+    errorCode?: string;
+    errorMessage?: string;
     durationMs: number;
     output?: string;
     outputExcerpt?: string;
@@ -312,6 +318,7 @@ export interface DungeonConfig {
     sessionWriteTelemetryAvailable: boolean;
     maxConcurrentDps: number;
     maxRepairRounds: number;
+    maxExecutionRetries: number;
     battleResCharges: number;
     commanderBattleResCharges: number;
     resurrectionTimeoutMs: number;
@@ -342,6 +349,8 @@ export interface DungeonServiceOptions {
     eventStore: DungeonEventStore;
     idGenerator?: () => string;
     clock?: () => string;
+    /** Injected artifact-existence probe so the core stays testable off-host. */
+    fileExists?: (absolutePath: string) => boolean;
     config?: Partial<DungeonConfig>;
     /** @deprecated Pass config.taskLeaseDurationMs instead. */
     taskLeaseDurationMs?: number;
@@ -366,9 +375,12 @@ export declare class DungeonService {
     private readonly eventStore;
     private readonly idGenerator;
     private readonly clock;
+    private readonly fileExists;
     private readonly config;
     private readonly waiters;
     private readonly sequenceCounters;
+    /** Serializes two-phase completion per run so concurrent finishes cannot interleave. */
+    private readonly completionLocks;
     constructor(options: DungeonServiceOptions);
     startRun(input: StartRunInput): DungeonRun;
     recoverRun(runId: string): DungeonRun;
@@ -424,10 +436,20 @@ export declare class DungeonService {
         criticalSignal?: boolean;
     }): DungeonRun;
     reopenTask(actor: Actor, runId: string, taskId: string, findingIds: string[]): TaskRecord;
+    /**
+     * Retry a task whose execution report ended blocked/failed. This closes the
+     * former dead end where a required task could neither reach VALIDATING
+     * (required tasks incomplete) nor be reopened (no failed validation report
+     * could ever be produced). The task returns to the schedulable pool with a
+     * bumped task version so stale reports are rejected; the retry budget is
+     * bounded by config.maxExecutionRetries.
+     */
+    retryExecution(actor: Actor, runId: string, taskId: string, reason: string): TaskRecord;
     observeWorkspaceFingerprint(runId: string, workspaceFingerprint: string): DungeonRun;
     createValidationManifest(actor: Actor, runId: string, workspaceFingerprint: string): ValidationManifest;
     submitValidation(actor: Actor, runId: string, submission: ValidationSubmission): ValidationReport;
     finishRun(actor: Actor, runId: string, resultSummary: string, workspaceFingerprint: string, recomputeFingerprint?: () => string | Promise<string>): Promise<DungeonRun>;
+    private finishRunUnlocked;
     waitForChange(actor: Actor, runId: string, afterSequence: number, timeoutMs?: number, signal?: AbortSignal): Promise<DungeonWaitResult>;
     sendPartyMessage(actor: Actor, runId: string, toSlot: PartySlot, input: PartyMessageInput): PartyMessage;
     getFingerprintIgnoreScopes(): string[];

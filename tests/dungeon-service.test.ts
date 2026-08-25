@@ -130,7 +130,9 @@ describe('DungeonService', () => {
 
     expect(run.phase).toBe('FORMING')
     expect(run.controlState).toBe('normal')
-    expect(run.scopeEnforcementMode).toBe('aggregate')
+    // Until per-agent write telemetry exists, auto resolves to the only
+    // honestly isolated mode: serialized write leases.
+    expect(run.scopeEnforcementMode).toBe('serial')
     expect(Object.keys(run.slots)).toEqual(['tank', 'dps-1', 'dps-2', 'dps-3', 'healer'])
     expect(run.slots.tank).toMatchObject({ currentSessionId: tank.sessionId, generation: 1 })
     expect(run.slots['dps-1']).toMatchObject({ generation: 0, history: [] })
@@ -689,5 +691,201 @@ describe('DungeonError', () => {
   it('exposes a machine-readable code', () => {
     const error = new DungeonError('EXAMPLE', 'example')
     expect(error).toMatchObject({ name: 'DungeonError', code: 'EXAMPLE', message: 'example' })
+  })
+})
+
+describe('dispatch invariants', () => {
+  it('refuses to assign a second task to a slot that already owns a ready task', () => {
+    const { service } = setup()
+    const run = service.startRun({
+      runId: 'run-1', objective: 'Build a reliable core', workspaceRoot: process.cwd(),
+      workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
+    })
+    service.bindMember(tank, run.id, 'healer', healer.sessionId)
+    service.bindMember(tank, run.id, 'dps-1', dps1.sessionId)
+    service.changePhase(tank, run.id, 'PLANNING')
+    service.createTask(tank, run.id, task())
+    service.createTask(tank, run.id, task({
+      id: 'task-2',
+      acceptanceCriteria: [{ id: 'task-2:works', description: 'Second task works', required: true }],
+      writeScopes: ['docs/**'],
+    }))
+    service.changePhase(tank, run.id, 'EXECUTING')
+    service.assignTask(tank, 'run-1', 'task-1', 'dps-1')
+
+    expect(() => service.assignTask(tank, 'run-1', 'task-2', 'dps-1'))
+      .toThrowError(expect.objectContaining({ code: 'SLOT_BUSY' }))
+  })
+
+  it('refuses a claim from a down member even when the session reappears', () => {
+    const { service } = setup()
+    createReadyRun(service)
+    service.assignTask(tank, 'run-1', 'task-1', 'dps-1')
+    service.markMemberDown('run-1', 'dps-1', 'runtime crashed')
+
+    expect(() => service.claimTask(dps1, 'run-1', 'task-1'))
+      .toThrowError(expect.objectContaining({ code: 'MEMBER_NOT_ALIVE' }))
+  })
+
+  it('freezes write leases while the healer is unavailable via health signals', () => {
+    const { service } = setup()
+    createReadyRun(service)
+    for (const kind of ['tool-failure', 'timeout'] as const) {
+      service.observeHealthSignal('run-1', {
+        slot: 'healer', source: 'runtime', kind, severity: 'critical',
+        windowMs: 120_000, evidence: [kind],
+      })
+    }
+
+    const run = service.getRun('run-1')
+    expect(run.slots.healer.readiness).toBe('unavailable')
+    expect(run.controlState).toBe('paused')
+
+    service.assignTask(tank, 'run-1', 'task-1', 'dps-1')
+    expect(() => service.claimTask(dps1, 'run-1', 'task-1'))
+      .toThrowError(expect.objectContaining({ code: 'DISPATCH_BLOCKED' }))
+    expect(() => service.resumeDispatch(tank, 'run-1'))
+      .toThrowError(expect.objectContaining({ code: 'HEALER_NOT_RECOVERED' }))
+  })
+
+  it('fails the run instead of throwing when the commander dies before the healer is bound', () => {
+    const { service } = setup()
+    service.startRun({
+      runId: 'run-1', objective: 'o', workspaceRoot: process.cwd(),
+      workspaceFingerprint: 'v1', tankSessionId: tank.sessionId,
+    })
+
+    expect(() => service.observeAgentDisposed(tank.sessionId, 'runtime Agent disposed')).not.toThrow()
+    expect(service.getRun('run-1').phase).toBe('FAILED')
+  })
+})
+
+describe('execution failure recovery', () => {
+  function blockedSubmission(lease: { leaseId: string; version: number }, taskVersion: number) {
+    return {
+      taskId: 'task-1', taskVersion, leaseId: lease.leaseId, leaseVersion: lease.version,
+      slot: 'dps-1' as const, generation: 1, status: 'blocked' as const,
+      summary: 'Blocked by an external dependency', changedFiles: [] as string[],
+      evidence: ['dependency unavailable'], commandsRun: [] as Array<{ command: string; summary: string }>,
+      risks: [] as string[], remainingWork: ['wait for dependency'],
+    }
+  }
+
+  it('lets a blocked required task be retried back into the schedulable pool', () => {
+    const { service } = setup()
+    createReadyRun(service)
+    service.assignTask(tank, 'run-1', 'task-1', 'dps-1')
+    let lease = service.claimTask(dps1, 'run-1', 'task-1')
+    service.submitExecution(dps1, 'run-1', blockedSubmission(lease, 1))
+
+    // The former dead end: VALIDATING is unreachable while the required task
+    // is blocked, and reopenTask needs a failed validation report that can
+    // never be produced. retryExecution breaks the cycle.
+    expect(() => service.changePhase(tank, 'run-1', 'VALIDATING'))
+      .toThrowError(expect.objectContaining({ code: 'INCOMPLETE_TASKS' }))
+
+    const retried = service.retryExecution(tank, 'run-1', 'task-1', 'external dependency is unblocked')
+    expect(retried).toMatchObject({ status: 'pending', executionRetries: 1 })
+    expect(retried.workOrder.version).toBe(2)
+    expect(retried.ownerSlot).toBeUndefined()
+
+    service.assignTask(tank, 'run-1', 'task-1', 'dps-1')
+    lease = service.claimTask(dps1, 'run-1', 'task-1')
+    service.submitExecution(dps1, 'run-1', {
+      taskId: 'task-1', taskVersion: 2, leaseId: lease.leaseId, leaseVersion: lease.version,
+      slot: 'dps-1', generation: 1, status: 'completed', summary: 'Done',
+      changedFiles: ['src/service/dungeon-service.ts'], evidence: ['tests green'],
+      commandsRun: [], risks: [], remainingWork: [],
+    })
+    expect(() => service.changePhase(tank, 'run-1', 'VALIDATING')).not.toThrow()
+  })
+
+  it('enforces the execution retry budget', () => {
+    const { service } = setup({ maxExecutionRetries: 1 })
+    createReadyRun(service)
+    service.assignTask(tank, 'run-1', 'task-1', 'dps-1')
+    let lease = service.claimTask(dps1, 'run-1', 'task-1')
+    service.submitExecution(dps1, 'run-1', blockedSubmission(lease, 1))
+    service.retryExecution(tank, 'run-1', 'task-1', 'first retry')
+    service.assignTask(tank, 'run-1', 'task-1', 'dps-1')
+    lease = service.claimTask(dps1, 'run-1', 'task-1')
+    service.submitExecution(dps1, 'run-1', blockedSubmission(lease, 2))
+
+    expect(() => service.retryExecution(tank, 'run-1', 'task-1', 'second retry'))
+      .toThrowError(expect.objectContaining({ code: 'RETRY_LIMIT_EXCEEDED' }))
+    expect(() => service.retryExecution(tank, 'run-1', 'task-1', ''))
+      .toThrowError(expect.objectContaining({ code: 'RETRY_REASON_REQUIRED' }))
+  })
+
+  it('allows reassignment away from a down owner without the interrupt flow', () => {
+    const { service } = setup()
+    createReadyRun(service)
+    service.bindMember(tank, 'run-1', 'dps-2', 'session-dps-2')
+    service.assignTask(tank, 'run-1', 'task-1', 'dps-1')
+    service.claimTask(dps1, 'run-1', 'task-1')
+
+    // Alive owner without a confirmed interrupt keeps the old gate.
+    expect(() => service.reassignTask(tank, 'run-1', 'task-1', 'dps-2'))
+      .toThrowError(expect.objectContaining({ code: 'INTERRUPT_NOT_CONFIRMED' }))
+
+    service.markMemberDown('run-1', 'dps-1', 'runtime crashed')
+    const reassigned = service.reassignTask(tank, 'run-1', 'task-1', 'dps-2')
+    expect(reassigned).toMatchObject({ status: 'ready' })
+    expect(reassigned.ownerSlot).toBe('dps-2')
+  })
+})
+
+describe('completion gate hardening', () => {
+  it('keeps a terminal CANCELLED run from being overwritten by a racing finish', async () => {
+    const { service, persisted } = setup()
+    validatingRun(service)
+    service.submitValidation(healer, 'run-1', passSubmission(
+      service.createValidationManifest(tank, 'run-1', 'fingerprint-v1'), 'validation-race',
+    ))
+
+    const finish = service.finishRun(tank, 'run-1', 'Shipped', 'fingerprint-v1', async () => {
+      // The tank cancels while the fingerprint recompute is in flight.
+      service.changePhase(tank, 'run-1', 'CANCELLED')
+      return 'fingerprint-v1'
+    })
+
+    await expect(finish).rejects.toThrowError(expect.objectContaining({ code: 'COMPLETION_CONFLICT' }))
+    expect(service.getRun('run-1').phase).toBe('CANCELLED')
+    expect(persisted.map((event) => event.type)).not.toContain('dungeon/run-completed')
+    expect(persisted.map((event) => event.type)).toContain('dungeon/run-completion-prepared')
+  })
+
+  it('completes without a validation report only when validationRequired is false', async () => {
+    const { service } = setup({ validationRequired: false })
+    createReadyRun(service)
+    service.assignTask(tank, 'run-1', 'task-1', 'dps-1')
+    const lease = service.claimTask(dps1, 'run-1', 'task-1')
+    service.submitExecution(dps1, 'run-1', {
+      taskId: 'task-1', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
+      slot: 'dps-1', generation: 1, status: 'completed', summary: 'Done',
+      changedFiles: ['src/service/dungeon-service.ts'], evidence: ['tests green'],
+      commandsRun: [], risks: [], remainingWork: [],
+    })
+    service.changePhase(tank, 'run-1', 'VALIDATING')
+
+    const finished = await service.finishRun(tank, 'run-1', 'Shipped', 'fingerprint-v1')
+    expect(finished.phase).toBe('COMPLETED')
+  })
+
+  it('still requires a current pass report when validationRequired is true', async () => {
+    const { service } = setup()
+    createReadyRun(service)
+    service.assignTask(tank, 'run-1', 'task-1', 'dps-1')
+    const lease = service.claimTask(dps1, 'run-1', 'task-1')
+    service.submitExecution(dps1, 'run-1', {
+      taskId: 'task-1', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
+      slot: 'dps-1', generation: 1, status: 'completed', summary: 'Done',
+      changedFiles: ['src/service/dungeon-service.ts'], evidence: ['tests green'],
+      commandsRun: [], risks: [], remainingWork: [],
+    })
+    service.changePhase(tank, 'run-1', 'VALIDATING')
+
+    await expect(service.finishRun(tank, 'run-1', 'Shipped', 'fingerprint-v1'))
+      .rejects.toThrowError(expect.objectContaining({ code: 'VALIDATION_REQUIRED' }))
   })
 })

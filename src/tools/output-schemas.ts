@@ -1,23 +1,23 @@
 import type { ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 
-const stringArray = { type: 'array', items: { type: 'string' } } as const
-const partySlot = { type: 'string', enum: ['tank', 'dps-1', 'dps-2', 'dps-3', 'healer'] } as const
-const dpsSlot = { type: 'string', enum: ['dps-1', 'dps-2', 'dps-3'] } as const
-const runPhase = {
+const stringArray: ValueSchemaSpec = { type: 'array', items: { type: 'string' } }
+const partySlot: ValueSchemaSpec = { type: 'string', enum: ['tank', 'dps-1', 'dps-2', 'dps-3', 'healer'] }
+const dpsSlot: ValueSchemaSpec = { type: 'string', enum: ['dps-1', 'dps-2', 'dps-3'] }
+const runPhase: ValueSchemaSpec = {
   type: 'string',
   enum: ['FORMING', 'PLANNING', 'PLAN_REVIEW', 'EXECUTING', 'VALIDATING', 'REPAIR', 'COMPLETED', 'FAILED', 'CANCELLED'],
-} as const
+}
 
-const acceptanceCriterion = {
+const acceptanceCriterion: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     id: { type: 'string', required: true },
     description: { type: 'string', required: true },
     required: { type: 'boolean', required: true },
   },
-} as const
+}
 
-const workOrder = {
+const workOrder: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     id: { type: 'string', required: true },
@@ -36,9 +36,9 @@ const workOrder = {
     required: { type: 'boolean', required: true },
     version: { type: 'integer', required: true },
   },
-} as const
+}
 
-const taskLease = {
+const taskLease: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     leaseId: { type: 'string', required: true },
@@ -47,27 +47,27 @@ const taskLease = {
     expiresAt: { type: 'string', required: true },
     version: { type: 'integer', required: true },
   },
-} as const
+}
 
-const modifiedAssertion = {
+const modifiedAssertion: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     file: { type: 'string', required: true },
     test: { type: 'string' },
     reason: { type: 'string', required: true },
   },
-} as const
+}
 
-const commandRun = {
+const commandRun: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     command: { type: 'string', required: true },
     exitCode: { type: 'number' },
     summary: { type: 'string', required: true },
   },
-} as const
+}
 
-const executionReport = {
+const executionReport: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     taskId: { type: 'string', required: true },
@@ -86,9 +86,9 @@ const executionReport = {
     remainingWork: { ...stringArray, required: true },
     workspaceFingerprint: { type: 'string' },
   },
-} as const
+}
 
-const checkpoint = {
+const checkpoint: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     checkpointId: { type: 'string', required: true },
@@ -104,9 +104,9 @@ const checkpoint = {
     workspaceFingerprint: { type: 'string', required: true },
     observedAt: { type: 'string' },
   },
-} as const
+}
 
-export const taskRecordSchema = {
+export const taskRecordSchema: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     workOrder: { ...workOrder, required: true },
@@ -126,11 +126,12 @@ export const taskRecordSchema = {
     quarantinedFiles: stringArray,
     quarantineReviewed: { type: 'boolean' },
     repairRound: { type: 'integer', required: true },
+    executionRetries: { type: 'integer', required: true },
     executionReports: { type: 'array', items: executionReport, required: true },
   },
-} as const
+}
 
-const slotHistory = {
+const slotHistory: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     sessionId: { type: 'string', required: true },
@@ -139,9 +140,9 @@ const slotHistory = {
     unboundAt: { type: 'string' },
     endReason: { type: 'string' },
   },
-} as const
+}
 
-const slotBinding = {
+const slotBinding: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     runId: { type: 'string', required: true },
@@ -153,9 +154,9 @@ const slotBinding = {
     readiness: { type: 'string', enum: ['healthy', 'degraded', 'unavailable', 'recovering'] },
     history: { type: 'array', items: slotHistory, required: true },
   },
-} as const
+}
 
-const slots = {
+const slots: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     tank: { ...slotBinding, required: true },
@@ -164,9 +165,9 @@ const slots = {
     'dps-3': { ...slotBinding, required: true },
     healer: { ...slotBinding, required: true },
   },
-} as const
+}
 
-const runTaskSummary = {
+const runTaskSummary: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     id: { type: 'string', required: true },
@@ -183,9 +184,9 @@ const runTaskSummary = {
     summary: { type: 'string' },
     modifiedAssertions: { type: 'array', items: modifiedAssertion },
   },
-} as const
+}
 
-const latestMessage = {
+const latestMessage: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     messageId: { type: 'string', required: true },
@@ -194,9 +195,9 @@ const latestMessage = {
     summary: { type: 'string' },
     createdAt: { type: 'string', required: true },
   },
-} as const
+}
 
-const recentHealthSignal = {
+const recentHealthSignal: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     id: { type: 'string', required: true },
@@ -210,20 +211,22 @@ const recentHealthSignal = {
     observedAt: { type: 'string', required: true },
     evidence: stringArray,
   },
-} as const
+}
 
-const verificationRunSummary = {
+const verificationRunSummary: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     command: { type: 'string', required: true },
     exitCode: { type: 'number' },
+    errorCode: { type: 'string' },
+    errorMessage: { type: 'string' },
     durationMs: { type: 'number', required: true },
     beganAt: { type: 'string', required: true },
     outputExcerpt: { type: 'string' },
   },
-} as const
+}
 
-export const runSummarySchema = {
+export const runSummarySchema: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     id: { type: 'string', required: true },
@@ -245,9 +248,9 @@ export const runSummarySchema = {
     resultSummary: { type: 'string' },
     updatedAt: { type: 'string', required: true },
   },
-} as const
+}
 
-const eventSummary = {
+const eventSummary: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     sequence: { type: 'integer', required: true },
@@ -261,9 +264,9 @@ const eventSummary = {
     ticketId: { type: 'string' },
     resurrectionId: { type: 'string' },
   },
-} as const
+}
 
-export const waitSchema = {
+export const waitSchema: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     run: { ...runSummarySchema, required: true },
@@ -271,9 +274,9 @@ export const waitSchema = {
     omittedEventCount: { type: 'integer', required: true },
     timedOut: { type: 'boolean', required: true },
   },
-} as const
+}
 
-const commanderCheckpoint = {
+const commanderCheckpoint: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     checkpointId: { type: 'string', required: true },
@@ -297,9 +300,9 @@ const commanderCheckpoint = {
     workspaceFingerprint: { type: 'string', required: true },
     createdAt: { type: 'string', required: true },
   },
-} as const
+}
 
-const healthTaskProgress = {
+const healthTaskProgress: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     taskId: { type: 'string', required: true },
@@ -307,9 +310,9 @@ const healthTaskProgress = {
     missedCheckpoints: { type: 'integer' },
     nextCheckpointDueAt: { type: 'string' },
   },
-} as const
+}
 
-export const healthSchema = {
+export const healthSchema: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     controlState: { type: 'string', enum: ['normal', 'throttled', 'paused', 'recovering'], required: true },
@@ -321,9 +324,9 @@ export const healthSchema = {
     battleResChargesRemaining: { type: 'integer', required: true },
     commanderBattleResChargesRemaining: { type: 'integer', required: true },
   },
-} as const
+}
 
-const assignmentFailure = {
+const assignmentFailure: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     ok: { type: 'boolean', const: false, required: true },
@@ -339,11 +342,11 @@ const assignmentFailure = {
       },
     },
   },
-} as const
+}
 
-export const assignmentSchema = { oneOf: [taskRecordSchema, assignmentFailure] } as const
+export const assignmentSchema: ValueSchemaSpec = { oneOf: [taskRecordSchema, assignmentFailure] }
 
-export const recoveryInstructionSchema = {
+export const recoveryInstructionSchema: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     instructionId: { type: 'string', required: true },
@@ -355,9 +358,9 @@ export const recoveryInstructionSchema = {
     expiresAt: { type: 'string', required: true },
     completedAt: { type: 'string' },
   },
-} as const
+}
 
-export const checkpointRequestSchema = {
+export const checkpointRequestSchema: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     requestId: { type: 'string', required: true },
@@ -372,9 +375,9 @@ export const checkpointRequestSchema = {
     dueAt: { type: 'string', required: true },
     completedAt: { type: 'string' },
   },
-} as const
+}
 
-const battleResFailure = {
+const battleResFailure: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     ok: { type: 'boolean', const: false, required: true },
@@ -383,9 +386,9 @@ const battleResFailure = {
     currentLifeState: { type: 'string', enum: ['alive', 'down', 'resurrection-requested', 'resurrecting', 'permanently-dead'] },
     recommendedTools: { ...stringArray, required: true },
   },
-} as const
+}
 
-export const resurrectionRequestSchema = {
+export const resurrectionRequestSchema: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     resurrectionId: { type: 'string', required: true },
@@ -396,11 +399,11 @@ export const resurrectionRequestSchema = {
     requestedAt: { type: 'string', required: true },
     expiresAt: { type: 'string', required: true },
   },
-} as const
+}
 
-export const battleResRequestSchema = { oneOf: [resurrectionRequestSchema, battleResFailure] } as const
+export const battleResRequestSchema: ValueSchemaSpec = { oneOf: [resurrectionRequestSchema, battleResFailure] }
 
-export const partyMessageSchema = {
+export const partyMessageSchema: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     messageId: { type: 'string', required: true },
@@ -412,9 +415,9 @@ export const partyMessageSchema = {
     evidence: { ...stringArray, required: true },
     createdAt: { type: 'string', required: true },
   },
-} as const
+}
 
-export const validationManifestSchema = {
+export const validationManifestSchema: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     runId: { type: 'string', required: true },
@@ -437,9 +440,9 @@ export const validationManifestSchema = {
     fingerprintIgnoreScopes: { ...stringArray, required: true },
     createdAt: { type: 'string', required: true },
   },
-} as const
+}
 
-const validationCheck = {
+const validationCheck: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     criterionId: { type: 'string', required: true },
@@ -447,9 +450,9 @@ const validationCheck = {
     evidence: { ...stringArray, required: true },
     notApplicableReason: { type: 'string' },
   },
-} as const
+}
 
-const validationFinding = {
+const validationFinding: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     id: { type: 'string', required: true },
@@ -459,9 +462,9 @@ const validationFinding = {
     evidence: { type: 'string', required: true },
     remediation: { type: 'string', required: true },
   },
-} as const
+}
 
-export const validationReportSchema = {
+export const validationReportSchema: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     runId: { type: 'string', required: true },
@@ -476,9 +479,9 @@ export const validationReportSchema = {
     summary: { type: 'string', required: true },
     createdAt: { type: 'string', required: true },
   },
-} as const
+}
 
-export const commanderTicketSchema = {
+export const commanderTicketSchema: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     ticketId: { type: 'string', required: true },
@@ -493,22 +496,24 @@ export const commanderTicketSchema = {
     recoveryExpiresAt: { type: 'string' },
     version: { type: 'integer', required: true },
   },
-} as const
+}
 
-export const battleResActionSchema = { oneOf: [resurrectionRequestSchema, commanderTicketSchema] } as const
+export const battleResActionSchema: ValueSchemaSpec = { oneOf: [resurrectionRequestSchema, commanderTicketSchema] }
 
-const verificationCommand = {
+const verificationCommand: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     command: { type: 'string', required: true },
     exitCode: { type: 'number' },
+    errorCode: { type: 'string' },
+    errorMessage: { type: 'string' },
     durationMs: { type: 'number', required: true },
     outputExcerpt: { type: 'string', required: true },
     beganAt: { type: 'string', required: true },
   },
-} as const
+}
 
-const verificationTimeout = {
+const verificationTimeout: ValueSchemaSpec = {
   type: 'object', additionalProperties: false,
   properties: {
     code: { type: 'string', const: 'VERIFICATION_TIMEOUT', required: true },
@@ -516,9 +521,9 @@ const verificationTimeout = {
     durationMs: { type: 'number', required: true },
     outputExcerpt: { type: 'string', required: true },
   },
-} as const
+}
 
-export const verificationSchema = { oneOf: [verificationCommand, verificationTimeout] } as const
+export const verificationSchema: ValueSchemaSpec = { oneOf: [verificationCommand, verificationTimeout] }
 
 function structuredOutput<const S extends ValueSchemaSpec>(schema: S) {
   return {

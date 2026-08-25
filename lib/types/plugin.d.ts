@@ -46,6 +46,7 @@ export declare const Config: z<Schemastery.ObjectS<{
         strictPerAgentWriteScopes: z<boolean, boolean>;
         maxConcurrentDps: z<number, number>;
         maxRepairRounds: z<number, number>;
+        maxExecutionRetries: z<number, number>;
         battleResCharges: z<number, number>;
         commanderBattleResCharges: z<number, number>;
         resurrectionTimeoutMs: z<number, number>;
@@ -71,6 +72,7 @@ export declare const Config: z<Schemastery.ObjectS<{
         strictPerAgentWriteScopes: z<boolean, boolean>;
         maxConcurrentDps: z<number, number>;
         maxRepairRounds: z<number, number>;
+        maxExecutionRetries: z<number, number>;
         battleResCharges: z<number, number>;
         commanderBattleResCharges: z<number, number>;
         resurrectionTimeoutMs: z<number, number>;
@@ -105,6 +107,7 @@ export declare const Config: z<Schemastery.ObjectS<{
         strictPerAgentWriteScopes: z<boolean, boolean>;
         maxConcurrentDps: z<number, number>;
         maxRepairRounds: z<number, number>;
+        maxExecutionRetries: z<number, number>;
         battleResCharges: z<number, number>;
         commanderBattleResCharges: z<number, number>;
         resurrectionTimeoutMs: z<number, number>;
@@ -130,6 +133,7 @@ export declare const Config: z<Schemastery.ObjectS<{
         strictPerAgentWriteScopes: z<boolean, boolean>;
         maxConcurrentDps: z<number, number>;
         maxRepairRounds: z<number, number>;
+        maxExecutionRetries: z<number, number>;
         battleResCharges: z<number, number>;
         commanderBattleResCharges: z<number, number>;
         resurrectionTimeoutMs: z<number, number>;
@@ -167,6 +171,7 @@ export declare class DungeonPartyService extends Service {
             strictPerAgentWriteScopes: z<boolean, boolean>;
             maxConcurrentDps: z<number, number>;
             maxRepairRounds: z<number, number>;
+            maxExecutionRetries: z<number, number>;
             battleResCharges: z<number, number>;
             commanderBattleResCharges: z<number, number>;
             resurrectionTimeoutMs: z<number, number>;
@@ -192,6 +197,7 @@ export declare class DungeonPartyService extends Service {
             strictPerAgentWriteScopes: z<boolean, boolean>;
             maxConcurrentDps: z<number, number>;
             maxRepairRounds: z<number, number>;
+            maxExecutionRetries: z<number, number>;
             battleResCharges: z<number, number>;
             commanderBattleResCharges: z<number, number>;
             resurrectionTimeoutMs: z<number, number>;
@@ -226,6 +232,7 @@ export declare class DungeonPartyService extends Service {
             strictPerAgentWriteScopes: z<boolean, boolean>;
             maxConcurrentDps: z<number, number>;
             maxRepairRounds: z<number, number>;
+            maxExecutionRetries: z<number, number>;
             battleResCharges: z<number, number>;
             commanderBattleResCharges: z<number, number>;
             resurrectionTimeoutMs: z<number, number>;
@@ -251,6 +258,7 @@ export declare class DungeonPartyService extends Service {
             strictPerAgentWriteScopes: z<boolean, boolean>;
             maxConcurrentDps: z<number, number>;
             maxRepairRounds: z<number, number>;
+            maxExecutionRetries: z<number, number>;
             battleResCharges: z<number, number>;
             commanderBattleResCharges: z<number, number>;
             resurrectionTimeoutMs: z<number, number>;

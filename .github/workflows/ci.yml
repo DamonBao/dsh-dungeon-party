@@ -36,8 +36,11 @@ jobs:
       - name: Type-check
         run: npm run typecheck
 
-      - name: Run tests
-        run: npm test
+      - name: Lint
+        run: npm run lint
+
+      - name: Run tests with coverage gate
+        run: npm run test:coverage
 
       - name: Build package
         run: npm run build
@@ -63,3 +66,55 @@ jobs:
           path: artifacts/*.tgz
           if-no-files-found: error
           retention-days: 14
+
+  consumer-smoke:
+    name: Consumer install + import smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Pack the release candidate
+        run: |
+          mkdir -p artifacts
+          npm pack --pack-destination artifacts
+
+      - name: Install the tarball as a consumer dependency
+        run: |
+          mkdir -p consumer
+          cd consumer
+          npm init --yes >/dev/null
+          # Resolves the published peer ranges for real; a broken range fails
+          # the job instead of hiding behind the repo's legacy-peer-deps.
+          npm install --no-audit --no-fund ../artifacts/jcy2387-dsh-dungeon-party-*.tgz
+
+      - name: Verify shipped artifact contract
+        working-directory: consumer
+        run: |
+          PKG_DIR="node_modules/@jcy2387/dsh-dungeon-party"
+          test -f "$PKG_DIR/lib/client.js"
+          test -f "$PKG_DIR/lib/client/index.d.ts"
+          test ! -f "$PKG_DIR/lib/client/index.js"
+          test -f "$PKG_DIR/preset/dungeon-party/preset.yml"
+
+      - name: Import every Node-side entry point
+        working-directory: consumer
+        run: |
+          node --input-type=module -e "
+            const root = await import('@jcy2387/dsh-dungeon-party');
+            if (typeof root.syncDungeonPartyPreset !== 'function') throw new Error('root entry missing syncDungeonPartyPreset');
+            const runtime = await import('@jcy2387/dsh-dungeon-party/runtime');
+            if (typeof runtime.DungeonService !== 'function') throw new Error('runtime entry missing DungeonService');
+            const presetSync = await import('@jcy2387/dsh-dungeon-party/preset-sync');
+            if (typeof presetSync.resolveDshHome !== 'function') throw new Error('preset-sync entry missing resolveDshHome');
+            const pkg = await import('@jcy2387/dsh-dungeon-party/package.json', { with: { type: 'json' } });
+            if (pkg.default.name !== '@jcy2387/dsh-dungeon-party') throw new Error('package.json entry broken');
+            console.log('consumer import smoke passed');
+          "

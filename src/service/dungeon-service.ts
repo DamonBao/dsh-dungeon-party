@@ -132,6 +132,7 @@ export interface TaskRecord {
   quarantinedFiles?: string[]
   quarantineReviewed?: boolean
   repairRound: number
+  executionRetries: number
   executionReports: ExecutionReport[]
 }
 
@@ -279,6 +280,9 @@ export interface CommanderCheckpoint {
 export interface VerificationCommandRun {
   command: string
   exitCode?: number
+  /** Spawn failure marker (e.g. ENOENT): the command never ran to completion. */
+  errorCode?: string
+  errorMessage?: string
   durationMs: number
   outputExcerpt: string
   beganAt: string
@@ -287,6 +291,8 @@ export interface VerificationCommandRun {
 export interface VerificationCommandResult {
   command: string
   exitCode?: number
+  errorCode?: string
+  errorMessage?: string
   durationMs: number
   output?: string
   outputExcerpt?: string
@@ -359,6 +365,7 @@ export interface DungeonConfig {
   sessionWriteTelemetryAvailable: boolean
   maxConcurrentDps: number
   maxRepairRounds: number
+  maxExecutionRetries: number
   battleResCharges: number
   commanderBattleResCharges: number
   resurrectionTimeoutMs: number
@@ -391,6 +398,8 @@ export interface DungeonServiceOptions {
   eventStore: DungeonEventStore
   idGenerator?: () => string
   clock?: () => string
+  /** Injected artifact-existence probe so the core stays testable off-host. */
+  fileExists?: (absolutePath: string) => boolean
   config?: Partial<DungeonConfig>
   /** @deprecated Pass config.taskLeaseDurationMs instead. */
   taskLeaseDurationMs?: number
@@ -423,6 +432,7 @@ export const defaultDungeonConfig: Readonly<DungeonConfig> = {
   sessionWriteTelemetryAvailable: false,
   maxConcurrentDps: 3,
   maxRepairRounds: 3,
+  maxExecutionRetries: 3,
   battleResCharges: 1,
   commanderBattleResCharges: 1,
   resurrectionTimeoutMs: 120_000,
@@ -464,17 +474,19 @@ export function resolveDungeonConfig(input: Partial<DungeonConfig>): DungeonConf
     assert(config.sessionWriteTelemetryAvailable, 'INVALID_CONFIG', 'telemetry mode requires Session write telemetry')
     config.effectiveScopeEnforcementMode = 'telemetry'
   } else if (config.scopeEnforcementMode === 'auto') {
+    // Until per-agent write telemetry is actually wired, the only honest
+    // default is serialized write leases: aggregate audits compare against
+    // the union of all active scopes and cannot attribute cross-task writes.
     config.effectiveScopeEnforcementMode = config.sessionWriteTelemetryAvailable
       ? 'telemetry'
-      : config.strictPerAgentWriteScopes
-        ? 'serial'
-        : 'aggregate'
+      : 'serial'
   } else {
     config.effectiveScopeEnforcementMode = config.scopeEnforcementMode
   }
   const positiveIntegers: Array<keyof DungeonConfig> = [
     'maxConcurrentDps',
     'maxRepairRounds',
+    'maxExecutionRetries',
     'progressCheckpointIntervalMs',
     'checkpointResponseTimeoutMs',
     'maxMissedCheckpoints',
@@ -615,14 +627,18 @@ export class DungeonService {
   private readonly eventStore: DungeonEventStore
   private readonly idGenerator: () => string
   private readonly clock: () => string
+  private readonly fileExists: (absolutePath: string) => boolean
   private readonly config: DungeonConfig
   private readonly waiters = new Map<string, Set<() => void>>()
   private readonly sequenceCounters = new Map<string, number>()
+  /** Serializes two-phase completion per run so concurrent finishes cannot interleave. */
+  private readonly completionLocks = new Map<string, Promise<unknown>>()
 
   constructor(options: DungeonServiceOptions) {
     this.eventStore = options.eventStore
     this.idGenerator = options.idGenerator ?? (() => crypto.randomUUID())
     this.clock = options.clock ?? (() => new Date().toISOString())
+    this.fileExists = options.fileExists ?? existsSync
     this.config = resolveDungeonConfig({
       ...options.config,
       ...(options.taskLeaseDurationMs === undefined ? {} : { taskLeaseDurationMs: options.taskLeaseDurationMs }),
@@ -692,7 +708,7 @@ export class DungeonService {
   }
 
   recoverRun(runId: string): DungeonRun {
-    const events = this.eventStore.load(runId).sort((a, b) => a.sequence - b.sequence)
+    const events = [...this.eventStore.load(runId)].sort((a, b) => a.sequence - b.sequence)
     assert(events.length > 0, 'RUN_NOT_FOUND', `Run ${runId} was not found`)
     let run: DungeonRun | undefined
     let expectedSequence = 1
@@ -810,6 +826,12 @@ export class DungeonService {
     const task = this.requireTask(run, taskId)
     if (task.ownerSlot === slot && task.status === 'ready') return clone(task)
     assert(['pending', 'ready'].includes(task.status) && !task.ownerSlot, 'TASK_NOT_ASSIGNABLE', `Task ${taskId} cannot be assigned`)
+    const busySlotTask = Object.values(run.tasks).find((candidate) =>
+      candidate.workOrder.id !== taskId &&
+      candidate.ownerSlot === slot &&
+      (candidate.status === 'ready' || candidate.status === 'running'),
+    )
+    assert(!busySlotTask, 'SLOT_BUSY', `Slot ${slot} already owns ${busySlotTask?.workOrder.id ?? 'another active task'}`)
     const unmet = task.workOrder.blockedBy.filter((dependency) => run.tasks[dependency]?.status !== 'completed')
     assert(unmet.length === 0, 'UNMET_DEPENDENCY', `Task is blocked by ${unmet.join(', ')}`)
     return clone(task)
@@ -833,16 +855,25 @@ export class DungeonService {
     )
     assert(run.controlState === 'normal', 'DISPATCH_BLOCKED', 'Run dispatch is not normal')
     const actorSlot = this.requireDps(run, actor.sessionId)
+    const binding = run.slots[actorSlot]
+    assert(binding.lifeState === 'alive', 'MEMBER_NOT_ALIVE', `Slot ${actorSlot} is down and cannot claim work`)
+    assert(binding.readiness !== 'unavailable', 'MEMBER_NOT_READY', `Slot ${actorSlot} is unavailable and cannot claim work`)
     const task = this.requireTask(run, taskId)
     assert(task.ownerSlot === actorSlot, 'FORBIDDEN', 'Task is not assigned to this DPS slot')
     assert(task.status === 'ready', 'TASK_NOT_CLAIMABLE', `Task ${taskId} is not ready (current status: ${task.status}${task.activeLease ? `; you already hold lease ${task.activeLease.leaseId}, submit via work_submit` : ''})`)
     assert(!task.activeLease, 'LEASE_EXISTS', 'Task already has an active lease')
     assert(run.slots.healer.currentSessionId, 'HEALER_REQUIRED', 'A healer must be bound before a write lease')
+    assert(run.slots.healer.readiness !== 'unavailable', 'HEALER_UNAVAILABLE', 'The healer is unavailable; new write leases stay frozen')
     const activeDps = new Set(Object.values(run.tasks).flatMap((candidate) =>
       candidate.activeLease ? [candidate.activeLease.ownerSlot] : [],
     ))
     assert(
-      activeDps.has(actorSlot) || activeDps.size < this.config.maxConcurrentDps,
+      !activeDps.has(actorSlot),
+      'LEASE_ALREADY_HELD',
+      `Slot ${actorSlot} already holds an active lease; submit or expire it before claiming another task`,
+    )
+    assert(
+      activeDps.size < this.config.maxConcurrentDps,
       'MAX_CONCURRENT_DPS',
       `At most ${this.config.maxConcurrentDps} DPS slots may hold leases concurrently`,
     )
@@ -929,7 +960,7 @@ export class DungeonService {
     }
     for (const changedFile of report.changedFiles) {
       const normalizedFile = normalizeWorkspacePath(changedFile)
-      assert(!/[?*\[\]{}]/.test(normalizedFile), 'INVALID_SCOPE', `Changed file must be a literal workspace path: ${changedFile}`)
+      assert(!/[?*[\]{}]/.test(normalizedFile), 'INVALID_SCOPE', `Changed file must be a literal workspace path: ${changedFile}`)
       assert(
         task.workOrder.writeScopes.some((scope) => normalizedFile === scope || matchesGlob(normalizedFile, scope)),
         'WRITE_SCOPE_VIOLATION',
@@ -939,7 +970,7 @@ export class DungeonService {
     if (report.status === 'completed') {
       for (const changedFile of report.changedFiles) {
         const absolutePath = join(run.workspaceRoot, changedFile)
-        assert(existsSync(absolutePath), 'ARTIFACT_NOT_FOUND', `Changed file does not exist on disk: ${changedFile}`)
+        assert(this.fileExists(absolutePath), 'ARTIFACT_NOT_FOUND', `Changed file does not exist on disk: ${changedFile}`)
       }
     }
     this.append(run, 'dungeon/task-submitted', { report: clone(report) }, actor.sessionId)
@@ -953,11 +984,15 @@ export class DungeonService {
     assert(Number.isInteger(result.durationMs) && result.durationMs >= 0, 'INVALID_ARGS', 'Verification duration must be a non-negative integer')
     assert(typeof result.beganAt === 'string' && result.beganAt.length > 0, 'INVALID_ARGS', 'Verification beganAt is required')
     assert(result.exitCode === undefined || Number.isInteger(result.exitCode), 'INVALID_ARGS', 'Verification exitCode must be an integer')
+    assert(result.errorCode === undefined || (typeof result.errorCode === 'string' && result.errorCode.trim()), 'INVALID_ARGS', 'Verification errorCode must be a non-empty string')
+    assert(result.errorMessage === undefined || typeof result.errorMessage === 'string', 'INVALID_ARGS', 'Verification errorMessage must be a string')
     const output = result.outputExcerpt ?? result.output ?? ''
     assert(typeof output === 'string', 'INVALID_ARGS', 'Verification output must be a string')
     const recorded: VerificationCommandRun = {
       command: result.command,
       ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }),
+      ...(result.errorCode === undefined ? {} : { errorCode: result.errorCode }),
+      ...(result.errorMessage === undefined ? {} : { errorMessage: result.errorMessage.slice(0, 500) }),
       durationMs: result.durationMs,
       outputExcerpt: output.slice(0, 4000),
       beganAt: result.beganAt,
@@ -994,7 +1029,23 @@ export class DungeonService {
       const slot = this.findSlot(run, sessionId)
       if (!slot) continue
       if (slot === 'tank') {
-        this.markCommanderUnavailable(run.id, reason)
+        try {
+          this.markCommanderUnavailable(run.id, reason)
+        } catch (error) {
+          // Before the healer is bound (FORMING/PLANNING) or once rescue
+          // charges are exhausted there is no recoverable path. Fail the run
+          // explicitly instead of throwing a domain error into the host event
+          // bus.
+          if (error instanceof DungeonError && (error.code === 'PARTY_NOT_RECOVERABLE' || error.code === 'NO_COMMANDER_RES_CHARGES')) {
+            this.append(this.requireRun(run.id), 'dungeon/run-failed', {
+              reason: error.code === 'PARTY_NOT_RECOVERABLE'
+                ? 'commander-lost-before-party-recoverable'
+                : 'commander-rescue-charges-exhausted',
+            })
+          } else {
+            throw error
+          }
+        }
       } else if (slot === 'healer') {
         this.append(run, 'dungeon/member-readiness-changed', {
           slot,
@@ -1311,7 +1362,7 @@ export class DungeonService {
       observedAt,
       version: priorVersion + 1,
     }
-    let updated = this.append(run, 'dungeon/member-health-signal-raised', { signal })
+    const updated = this.append(run, 'dungeon/member-health-signal-raised', { signal })
     const cutoff = Date.parse(observedAt) - this.config.readinessEvaluationWindowMs
     const recent = updated.healthSignals.filter(
       (item) => item.slot === input.slot && Date.parse(item.observedAt) >= cutoff,
@@ -1325,13 +1376,17 @@ export class DungeonService {
           ? 'degraded'
           : undefined
     if (nextReadiness && updated.slots[input.slot].readiness !== nextReadiness) {
-      updated = this.append(updated, 'dungeon/member-readiness-changed', {
+      this.append(updated, 'dungeon/member-readiness-changed', {
         slot: input.slot,
         readiness: nextReadiness,
         signalIds: recent.map((item) => item.id),
       })
       if (nextReadiness === 'unavailable' && input.slot === 'tank') {
         this.markCommanderUnavailable(runId, `objective health signals: ${recent.map((item) => item.id).join(', ')}`)
+      } else if (nextReadiness === 'unavailable' && input.slot === 'healer') {
+        // PRD §10.3: without an available validator, freeze new write leases
+        // regardless of how the unavailability was signalled.
+        this.append(this.requireRun(runId), 'dungeon/dispatch-paused', { reason: 'healer-unavailable' })
       } else if (nextReadiness === 'unavailable' && input.slot.startsWith('dps-')) {
         this.markMemberDown(
           runId,
@@ -1440,12 +1495,26 @@ export class DungeonService {
 
   reassignTask(actor: Actor, runId: string, taskId: string, ownerSlot: DpsSlot): TaskRecord {
     const run = this.requireTank(actor, runId)
+    this.assertMutable(run)
     const task = this.requireTask(run, taskId)
-    assert(task.interruptState === 'completed', 'INTERRUPT_NOT_CONFIRMED', 'Original Turn termination is not confirmed')
+    const ownerBinding = task.ownerSlot ? run.slots[task.ownerSlot] : undefined
+    const ownerDown = ownerBinding?.lifeState === 'down' || ownerBinding?.lifeState === 'permanently-dead'
+    assert(
+      task.interruptState === 'completed' || ownerDown,
+      'INTERRUPT_NOT_CONFIRMED',
+      'Original Turn termination is not confirmed and the current owner is not down',
+    )
     assert(!task.activeLease, 'ACTIVE_LEASE_EXISTS', 'Old lease must be revoked before reassignment')
     assert(!task.quarantinedFiles?.length || task.quarantineReviewed, 'QUARANTINE_REVIEW_REQUIRED', 'Quarantined workspace changes require tank review')
     assert(run.slots[ownerSlot].currentSessionId, 'UNBOUND_SLOT', `Slot ${ownerSlot} is not bound`)
+    assert(run.slots[ownerSlot].lifeState === 'alive', 'MEMBER_NOT_ALIVE', `Slot ${ownerSlot} is down and cannot take work`)
     assert(task.ownerSlot !== ownerSlot, 'OWNER_UNCHANGED', 'Choose a different DPS owner')
+    const busySlotTask = Object.values(run.tasks).find((candidate) =>
+      candidate.workOrder.id !== taskId &&
+      candidate.ownerSlot === ownerSlot &&
+      (candidate.status === 'ready' || candidate.status === 'running'),
+    )
+    assert(!busySlotTask, 'SLOT_BUSY', `Slot ${ownerSlot} already owns ${busySlotTask?.workOrder.id ?? 'another active task'}`)
     const updated = this.append(run, 'dungeon/task-owner-reassigned', {
       taskId,
       previousOwnerSlot: task.ownerSlot,
@@ -1615,6 +1684,45 @@ export class DungeonService {
     return clone(updated.tasks[taskId]!)
   }
 
+  /**
+   * Retry a task whose execution report ended blocked/failed. This closes the
+   * former dead end where a required task could neither reach VALIDATING
+   * (required tasks incomplete) nor be reopened (no failed validation report
+   * could ever be produced). The task returns to the schedulable pool with a
+   * bumped task version so stale reports are rejected; the retry budget is
+   * bounded by config.maxExecutionRetries.
+   */
+  retryExecution(actor: Actor, runId: string, taskId: string, reason: string): TaskRecord {
+    const run = this.requireTank(actor, runId)
+    this.assertMutable(run)
+    assert(
+      run.phase === 'EXECUTING' || run.phase === 'REPAIR',
+      'INVALID_PHASE',
+      'Execution retries require EXECUTING or REPAIR',
+    )
+    const task = this.requireTask(run, taskId)
+    assert(
+      task.status === 'blocked' || task.status === 'failed',
+      'TASK_NOT_RETRYABLE',
+      `Only blocked or failed tasks can be retried (current status: ${task.status})`,
+    )
+    assert(!task.activeLease, 'ACTIVE_LEASE_EXISTS', 'The active lease must be revoked before a retry')
+    assert(typeof reason === 'string' && reason.trim(), 'RETRY_REASON_REQUIRED', 'An auditable retry reason is required')
+    assert(
+      task.executionRetries < this.config.maxExecutionRetries,
+      'RETRY_LIMIT_EXCEEDED',
+      `Task ${taskId} exceeded the execution retry limit (${this.config.maxExecutionRetries})`,
+    )
+    const updated = this.append(run, 'dungeon/task-retried', {
+      taskId,
+      reason,
+      taskVersion: task.workOrder.version + 1,
+      taskSetVersion: run.taskSetVersion + 1,
+      executionRetries: task.executionRetries + 1,
+    }, actor.sessionId)
+    return clone(updated.tasks[taskId]!)
+  }
+
   observeWorkspaceFingerprint(runId: string, workspaceFingerprint: string): DungeonRun {
     const run = this.requireRun(runId)
     this.assertMutable(run)
@@ -1662,6 +1770,7 @@ export class DungeonService {
     const run = this.requireRun(runId)
     const healerSlot = this.findSlot(run, actor.sessionId)
     assert(healerSlot === 'healer', 'FORBIDDEN', 'Only the bound healer can submit validation')
+    assert(run.slots.healer.readiness !== 'unavailable', 'HEALER_UNAVAILABLE', 'An unavailable healer cannot submit validation')
     assert(run.phase === 'VALIDATING', 'INVALID_PHASE', 'Run is not validating')
     assert(Array.isArray(submission.checks) && Array.isArray(submission.findings), 'INVALID_VALIDATION', 'Validation checks and findings are required')
     assert(typeof submission.summary === 'string' && submission.summary.trim(), 'INVALID_VALIDATION', 'Validation summary is required')
@@ -1734,6 +1843,28 @@ export class DungeonService {
     workspaceFingerprint: string,
     recomputeFingerprint?: () => string | Promise<string>,
   ): Promise<DungeonRun> {
+    // Serialize completion attempts per run: the two-phase gate awaits a
+    // workspace recompute, and overlapping finishes (or a cancel landing in
+    // that window) must not interleave prepared/completed events.
+    const previous = this.completionLocks.get(runId) ?? Promise.resolve()
+    const chained = previous.catch(() => undefined).then(() =>
+      this.finishRunUnlocked(actor, runId, resultSummary, workspaceFingerprint, recomputeFingerprint),
+    )
+    this.completionLocks.set(runId, chained)
+    try {
+      return await chained
+    } finally {
+      if (this.completionLocks.get(runId) === chained) this.completionLocks.delete(runId)
+    }
+  }
+
+  private async finishRunUnlocked(
+    actor: Actor,
+    runId: string,
+    resultSummary: string,
+    workspaceFingerprint: string,
+    recomputeFingerprint?: () => string | Promise<string>,
+  ): Promise<DungeonRun> {
     const run = this.requireTank(actor, runId)
     assert(run.phase === 'VALIDATING', 'INVALID_PHASE', 'Only a validating run can be completed')
     assert(run.controlState === 'normal', 'RUN_NOT_READY', 'Run control state must be normal')
@@ -1759,46 +1890,64 @@ export class DungeonService {
     )
     const manifest = run.manifests.at(-1)
     const report = run.validationReports.at(-1)
-    assert(manifest && report, 'VALIDATION_REQUIRED', 'A current pass report is required')
-    assert(report.status === 'current' && report.verdict === 'pass', 'VALIDATION_REQUIRED', 'A current pass report is required')
-    assert(
-      report.taskSetVersion === run.taskSetVersion &&
-        report.manifestVersion === manifest.manifestVersion &&
-        report.workspaceFingerprint === workspaceFingerprint &&
-        manifest.workspaceFingerprint === workspaceFingerprint,
-      'STALE_VALIDATION',
-      'Workspace or task set changed after validation',
-    )
-    assert(
-      !report.findings.some((finding) => finding.severity === 'critical' || finding.severity === 'major'),
-      'VALIDATION_REQUIRED',
-      'Blocking findings remain',
-    )
-    const prepared = this.append(run, 'dungeon/run-completion-prepared', {
+    if (this.config.validationRequired) {
+      assert(manifest && report, 'VALIDATION_REQUIRED', 'A current pass report is required')
+      assert(report!.status === 'current' && report!.verdict === 'pass', 'VALIDATION_REQUIRED', 'A current pass report is required')
+      assert(
+        report!.taskSetVersion === run.taskSetVersion &&
+          report!.manifestVersion === manifest!.manifestVersion &&
+          report!.workspaceFingerprint === workspaceFingerprint &&
+          manifest!.workspaceFingerprint === workspaceFingerprint,
+        'STALE_VALIDATION',
+        'Workspace or task set changed after validation',
+      )
+      assert(
+        !report!.findings.some((finding) => finding.severity === 'critical' || finding.severity === 'major'),
+        'VALIDATION_REQUIRED',
+        'Blocking findings remain',
+      )
+    }
+    this.append(run, 'dungeon/run-completion-prepared', {
       taskSetVersion: run.taskSetVersion,
-      manifestVersion: manifest.manifestVersion,
+      manifestVersion: manifest?.manifestVersion ?? 0,
       workspaceFingerprint,
     }, actor.sessionId)
+    const preparedSequence = this.sequenceCounters.get(run.id)
     // PRD §14.1 two-phase completion: after preparing, recompute the
     // workspace fingerprint and only commit the terminal event when the
-    // workspace is unchanged; otherwise fail safely and keep the run
-    // validating against a now-stale acceptance report.
+    // workspace is unchanged AND no other command landed during the await;
+    // otherwise fail safely and keep the run validating against a now-stale
+    // acceptance report.
     if (recomputeFingerprint) {
       const actualFingerprint = await recomputeFingerprint()
-      if (actualFingerprint !== workspaceFingerprint) {
-        this.append(prepared, 'dungeon/run-completion-aborted', {
+      const latest = this.requireRun(runId)
+      if (terminalPhases.includes(latest.phase)) {
+        throw new DungeonError('COMPLETION_CONFLICT', `Run entered terminal phase ${latest.phase} during completion`)
+      }
+      const stateChanged = this.sequenceCounters.get(runId) !== preparedSequence ||
+        latest.phase !== 'VALIDATING' ||
+        latest.controlState !== 'normal'
+      if (stateChanged || actualFingerprint !== workspaceFingerprint) {
+        this.append(latest, 'dungeon/run-completion-aborted', {
           expectedFingerprint: workspaceFingerprint,
           actualFingerprint,
           taskSetVersion: run.taskSetVersion,
-          manifestVersion: manifest.manifestVersion,
+          manifestVersion: manifest?.manifestVersion ?? 0,
+          reason: stateChanged ? 'state-changed-during-completion' : 'workspace-changed-during-completion',
         }, actor.sessionId)
+        if (stateChanged) {
+          throw new DungeonError(
+            'COMPLETION_CONFLICT',
+            'Run state changed during completion; re-check party state and validation before finishing',
+          )
+        }
         throw new DungeonError(
           'WORKSPACE_CHANGED_DURING_COMPLETION',
           `Workspace changed during completion: expected fingerprint ${workspaceFingerprint} but recomputed ${actualFingerprint}`,
         )
       }
     }
-    const completed = this.append(prepared, 'dungeon/run-completed', { resultSummary }, actor.sessionId)
+    const completed = this.append(this.requireRun(runId), 'dungeon/run-completed', { resultSummary }, actor.sessionId)
     return clone(completed)
   }
 
@@ -2109,6 +2258,7 @@ export class DungeonService {
           workOrder: payload.workOrder,
           status: 'pending',
           repairRound: 0,
+          executionRetries: 0,
           executionReports: [],
         }
         run.taskSetVersion = payload.taskSetVersion
@@ -2151,6 +2301,9 @@ export class DungeonService {
           checkpointRequest.completedAt = event.occurredAt
         }
         delete task.activeLease
+        // Close the slot activity again: a member that handed in work is idle
+        // until it claims another lease.
+        run.slots[report.slot as DpsSlot].activityState = 'idle'
         break
       }
       case 'dungeon/task-turn-registered':
@@ -2178,6 +2331,11 @@ export class DungeonService {
         // turn-interrupted) keep the owner so battle resurrection and
         // reassignment keep their target.
         if (payload.reason === 'lease-expired') delete task.ownerSlot
+        if (task.ownerSlot) {
+          const ownerBinding = run.slots[task.ownerSlot]
+          // A down member keeps its stopped activity; alive owners go idle.
+          if (ownerBinding.lifeState === 'alive') ownerBinding.activityState = 'idle'
+        }
         break
       }
       case 'dungeon/workspace-changes-quarantined': {
@@ -2239,6 +2397,19 @@ export class DungeonService {
         task.workOrder.version = payload.taskVersion
         task.repairRound = payload.repairRound
         task.status = 'pending'
+        delete task.activeLease
+        delete task.ownerSlot
+        run.taskSetVersion = payload.taskSetVersion
+        this.staleReports(run)
+        break
+      }
+      case 'dungeon/task-retried': {
+        const task = run.tasks[payload.taskId]!
+        task.workOrder.version = payload.taskVersion
+        task.executionRetries = payload.executionRetries
+        task.status = 'pending'
+        task.progressState = 'on-track'
+        task.missedCheckpoints = 0
         delete task.activeLease
         delete task.ownerSlot
         run.taskSetVersion = payload.taskSetVersion

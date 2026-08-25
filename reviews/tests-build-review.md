@@ -1,3 +1,5 @@
+> **状态（2026-08-24 标注）**：本报告基于更早代码快照，行号与部分结论已失效；请以 `reviews/full-stack-review-2026-08-24.md` 为准。其中的 P0/P1 项已在后续修复中落地并补充回归测试。
+
 # 测试套件与构建打包评审报告（tests + build + preset）
 
 > **评审范围**：tests/ 下 14 个测试文件、tsconfig.json、tsconfig.build.json、tsdown.config.ts、package.json、preset/dungeon-party/*、cordis.patch.yml、README.md  
