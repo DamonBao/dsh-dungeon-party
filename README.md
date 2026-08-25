@@ -7,7 +7,7 @@
 <p align="center">
   <a href="./README.zh-CN.md">简体中文</a> ·
   <strong>English</strong> ·
-  <a href="./docs/dsh-dungeon-party-prd.md">PRD</a>
+  <a href="https://github.com/DamonBao/dsh-dungeon-party/blob/main/docs/dsh-dungeon-party-prd.md">PRD</a>
 </p>
 
 <p align="center">
@@ -261,4 +261,4 @@ The current persistence and dispatch contract is **single-process per run**:
 
 The core orchestration, persistence, recovery, validation, Web overlay, explicit tool contracts, and CPU queue are implemented and covered by automated tests. Planned work includes stronger cross-process append coordination, crash-injection compensation, offline message acknowledgement/retry, and richer DAG/history visualization.
 
-For the complete behavioral specification, see [`docs/dsh-dungeon-party-prd.md`](./docs/dsh-dungeon-party-prd.md).
+For the complete behavioral specification, see [`docs/dsh-dungeon-party-prd.md`](https://github.com/DamonBao/dsh-dungeon-party/blob/main/docs/dsh-dungeon-party-prd.md).

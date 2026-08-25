@@ -1,5 +1,5 @@
-import { Component, ReactNode } from "react";
 import * as react_jsx_runtime0 from "react/jsx-runtime";
+import { Component, ReactNode } from "react";
 import { ClientContext } from "@deepseek-ai/dsh-client-runtime/client";
 import { PropsRuntime } from "@deepseek-ai/dsh-client-ui-slots";
 

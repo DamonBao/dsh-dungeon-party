@@ -7,7 +7,7 @@
 <p align="center">
   <strong>简体中文</strong> ·
   <a href="./README.md">English</a> ·
-  <a href="./docs/dsh-dungeon-party-prd.md">完整 PRD</a>
+  <a href="https://github.com/DamonBao/dsh-dungeon-party/blob/main/docs/dsh-dungeon-party-prd.md">完整 PRD</a>
 </p>
 
 <p align="center">
@@ -261,4 +261,4 @@ Dependabot 每周检查 npm 和 GitHub Actions 依赖更新。
 
 核心编排、事件持久化、恢复、验收、Web 面板、显式工具契约与 CPU 队列均已实现并由自动化测试覆盖。后续计划包括跨进程原子事件追加、崩溃注入补偿、离线消息确认与重试，以及更完整的 DAG 和历史回放界面。
 
-完整行为规范见 [`docs/dsh-dungeon-party-prd.md`](./docs/dsh-dungeon-party-prd.md)。
+完整行为规范见 [`docs/dsh-dungeon-party-prd.md`](https://github.com/DamonBao/dsh-dungeon-party/blob/main/docs/dsh-dungeon-party-prd.md)。
