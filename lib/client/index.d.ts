@@ -1,3 +1,4 @@
+import { Component, ReactNode } from "react";
 import * as react_jsx_runtime0 from "react/jsx-runtime";
 import { ClientContext } from "@deepseek-ai/dsh-client-runtime/client";
 import { PropsRuntime } from "@deepseek-ai/dsh-client-ui-slots";
@@ -301,6 +302,19 @@ interface ValidationFindingGroup {
 declare function validationCheckCounts(report: Pick<ValidationReport, 'checks'> | null | undefined): Record<ValidationCheckStatus, number>;
 /** Group findings by severity (critical → major → minor, unknown severities last). */
 declare function validationFindingGroups(findings: ValidationReport['findings'] | null | undefined): ValidationFindingGroup[];
+/** Render durable ISO timestamps through the host locale, falling back gracefully. */
+declare function formatTime(iso: string | undefined): string;
+interface OverlayErrorBoundaryState {
+  error: Error | undefined;
+}
+/** Keeps a malformed projection from taking down the whole shell overlay. */
+declare class OverlayErrorBoundary extends Component<{
+  children: ReactNode;
+}, OverlayErrorBoundaryState> {
+  state: OverlayErrorBoundaryState;
+  static getDerivedStateFromError(error: Error): OverlayErrorBoundaryState;
+  render(): ReactNode;
+}
 interface DungeonPartyOverlayProps extends PropsRuntime<'shell.overlay'> {
   requestAction: (instruction: string) => Promise<boolean>;
 }
@@ -311,4 +325,4 @@ declare function DungeonPartyOverlay({
 declare const inject: string[];
 declare function apply(ctx: ClientContext): void;
 //#endregion
-export { DungeonPartyOverlay, MemberMeters, ValidationFindingGroup, apply, inject, memberMeters, validationCheckCounts, validationFindingGroups };
+export { DungeonPartyOverlay, MemberMeters, OverlayErrorBoundary, ValidationFindingGroup, apply, formatTime, inject, memberMeters, validationCheckCounts, validationFindingGroups };

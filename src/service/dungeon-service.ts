@@ -960,7 +960,7 @@ export class DungeonService {
     }
     for (const changedFile of report.changedFiles) {
       const normalizedFile = normalizeWorkspacePath(changedFile)
-      assert(!/[?*\[\]{}]/.test(normalizedFile), 'INVALID_SCOPE', `Changed file must be a literal workspace path: ${changedFile}`)
+      assert(!/[?*[\]{}]/.test(normalizedFile), 'INVALID_SCOPE', `Changed file must be a literal workspace path: ${changedFile}`)
       assert(
         task.workOrder.writeScopes.some((scope) => normalizedFile === scope || matchesGlob(normalizedFile, scope)),
         'WRITE_SCOPE_VIOLATION',
@@ -1362,7 +1362,7 @@ export class DungeonService {
       observedAt,
       version: priorVersion + 1,
     }
-    let updated = this.append(run, 'dungeon/member-health-signal-raised', { signal })
+    const updated = this.append(run, 'dungeon/member-health-signal-raised', { signal })
     const cutoff = Date.parse(observedAt) - this.config.readinessEvaluationWindowMs
     const recent = updated.healthSignals.filter(
       (item) => item.slot === input.slot && Date.parse(item.observedAt) >= cutoff,
@@ -1376,7 +1376,7 @@ export class DungeonService {
           ? 'degraded'
           : undefined
     if (nextReadiness && updated.slots[input.slot].readiness !== nextReadiness) {
-      updated = this.append(updated, 'dungeon/member-readiness-changed', {
+      this.append(updated, 'dungeon/member-readiness-changed', {
         slot: input.slot,
         readiness: nextReadiness,
         signalIds: recent.map((item) => item.id),
@@ -1907,7 +1907,7 @@ export class DungeonService {
         'Blocking findings remain',
       )
     }
-    const prepared = this.append(run, 'dungeon/run-completion-prepared', {
+    this.append(run, 'dungeon/run-completion-prepared', {
       taskSetVersion: run.taskSetVersion,
       manifestVersion: manifest?.manifestVersion ?? 0,
       workspaceFingerprint,

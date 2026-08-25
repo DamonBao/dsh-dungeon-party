@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   DungeonPartyOverlay,
+  OverlayErrorBoundary,
+  formatTime,
   inject,
   memberMeters,
   validationCheckCounts,
@@ -337,5 +339,113 @@ describe('DungeonPartyOverlay', () => {
     expect(text).toContain('未知槽位')
     expect(text).toContain('已签发')
     expect(text).toContain('复活进行中')
+  })
+
+  it('drops pending confirmations when the projected run changes', () => {
+    const run = runProjection()
+    const renderer = renderOverlay(run)
+    switchTab(renderer, '指挥')
+    act(() => renderer.root.findAllByProps({ className: 'dp-button' })[0]!.props.onClick())
+    expect(renderer.root.findByProps({ role: 'alertdialog' })).toBeTruthy()
+
+    act(() => renderer.update(<DungeonPartyOverlay
+      requestAction={async () => true}
+      useSessions={overlayUseSessions({ ...run, id: 'run-2' })}
+      useWorkspaces={(() => undefined) as never}
+    />))
+
+    expect(renderer.root.findAllByProps({ role: 'alertdialog' })).toHaveLength(0)
+  })
+
+  it('ignores submission results that arrive after the run changed', async () => {
+    const run = runProjection()
+    let resolveAction: ((value: boolean) => void) | undefined
+    const requestAction = vi.fn(() => new Promise<boolean>((resolve) => {
+      resolveAction = resolve
+    }))
+    const renderer = create(<DungeonPartyOverlay
+      requestAction={requestAction}
+      useSessions={overlayUseSessions(run)}
+      useWorkspaces={(() => undefined) as never}
+    />)
+    switchTab(renderer, '指挥')
+    act(() => renderer.root.findAllByProps({ className: 'dp-button' })[0]!.props.onClick())
+    await act(async () => {
+      renderer.root.findAllByType('button').find((button) => button.children.includes('确认提交'))!.props.onClick()
+    })
+    expect(requestAction).toHaveBeenCalledOnce()
+
+    // The user switches runs while the queue acknowledgement is in flight.
+    act(() => renderer.update(<DungeonPartyOverlay
+      requestAction={requestAction}
+      useSessions={overlayUseSessions({ ...run, id: 'run-2' })}
+      useWorkspaces={(() => undefined) as never}
+    />))
+    await act(async () => {
+      resolveAction?.(true)
+      await Promise.resolve()
+    })
+
+    expect(renderer.root.findAllByProps({ role: 'status' })).toHaveLength(0)
+  })
+
+  it('supports APG tab keyboard navigation and keyboard resizing', () => {
+    const renderer = renderOverlay(runProjection())
+    const tablist = renderer.root.findByProps({ role: 'tablist' })
+    act(() => tablist.props.onKeyDown({ key: 'ArrowRight' }))
+    expect(renderer.root.findByProps({ 'aria-label': '任务面板' }).props['aria-selected']).toBe(true)
+    act(() => tablist.props.onKeyDown({ key: 'End' }))
+    expect(renderer.root.findByProps({ 'aria-label': '指挥面板' }).props['aria-selected']).toBe(true)
+    act(() => tablist.props.onKeyDown({ key: 'ArrowLeft' }))
+    expect(renderer.root.findByProps({ 'aria-label': '验收与战复面板' }).props['aria-selected']).toBe(true)
+    act(() => tablist.props.onKeyDown({ key: 'Home' }))
+    expect(renderer.root.findByProps({ 'aria-label': '队伍面板' }).props['aria-selected']).toBe(true)
+    expect(renderer.root.findByProps({ role: 'tabpanel' }).props['aria-labelledby']).toBe('dp-tab-party')
+
+    const widthResize = renderer.root.findByProps({ 'aria-label': '调整副本面板宽度' })
+    expect(widthResize.props['aria-valuenow']).toBe(348)
+    act(() => widthResize.props.onKeyDown({ key: 'ArrowRight' }))
+    expect(renderer.root.findByProps({ role: 'dialog' }).props.style.width).toBe(364)
+
+    const heightResize = renderer.root.findByProps({ 'aria-label': '调整副本面板高度' })
+    act(() => heightResize.props.onKeyDown({ key: 'ArrowDown' }))
+    expect(renderer.root.findByProps({ role: 'dialog' }).props.style.height).toBe(656)
+  })
+
+  it('cancels open confirmations with Escape before closing the panel', () => {
+    const renderer = renderOverlay(runProjection())
+    switchTab(renderer, '指挥')
+    act(() => renderer.root.findAllByProps({ className: 'dp-button' })[0]!.props.onClick())
+    const dialog = () => renderer.root.findByProps({ role: 'dialog' })
+
+    act(() => dialog().props.onKeyDown({ key: 'Escape' }))
+    expect(renderer.root.findAllByProps({ role: 'alertdialog' })).toHaveLength(0)
+    expect(dialog()).toBeTruthy()
+
+    act(() => dialog().props.onKeyDown({ key: 'Escape' }))
+    expect(renderer.root.findAllByProps({ role: 'dialog' })).toHaveLength(0)
+  })
+
+  it('contains render crashes in an error boundary and recovers on retry', () => {
+    let shouldThrow = true
+    function FlakyChild() {
+      if (shouldThrow) throw new Error('projection exploded')
+      return <div>recovered</div>
+    }
+    const renderer = create(<OverlayErrorBoundary><FlakyChild/></OverlayErrorBoundary>)
+    expect(textOf(renderer.toJSON())).toContain('副本面板渲染失败')
+    expect(textOf(renderer.toJSON())).toContain('projection exploded')
+
+    shouldThrow = false
+    const retry = renderer.root.findAllByType('button').find((button) => button.children.includes('重试渲染'))!
+    act(() => retry.props.onClick())
+    expect(textOf(renderer.toJSON())).toContain('recovered')
+  })
+
+  it('formats ISO timestamps defensively', () => {
+    expect(formatTime(undefined)).toBe('—')
+    expect(formatTime('not-a-date')).toBe('not-a-date')
+    expect(formatTime('2025-01-01T00:10:00.000Z')).not.toBe('')
+    expect(formatTime('2025-01-01T00:10:00.000Z')).not.toContain('T00:10:00.000Z')
   })
 })
