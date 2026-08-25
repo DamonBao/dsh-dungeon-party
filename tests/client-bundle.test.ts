@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 const root = new URL('../', import.meta.url)
 
-describe('DSH rc1 client bundle', () => {
+describe('DSH rc2 client bundle', () => {
   it('publishes the module-loader closure artifact expected by dsh web', async () => {
     const pkg = JSON.parse(await readFile(new URL('package.json', root), 'utf8')) as {
       name: string
@@ -11,7 +11,7 @@ describe('DSH rc1 client bundle', () => {
       peerDependencies: Record<string, string>
     }
     expect(pkg.name).toBe('@jcy2387/dsh-dungeon-party')
-    expect(pkg.peerDependencies['@deepseek-ai/dsh-client-runtime']).toBe('>=0.1.1-rc.1 <0.2.0')
+    expect(pkg.peerDependencies['@deepseek-ai/dsh-client-runtime']).toBe('>=0.1.1-rc.2 <0.2.0')
     expect((pkg.exports['./client'] as { default?: string })?.default).toBe('./lib/client.js')
     expect((pkg.exports['.'] as { default?: string })?.default).toBe('./lib/preset-sync.js')
     expect((pkg.exports['./runtime'] as { default?: string })?.default).toBe('./lib/index.js')
