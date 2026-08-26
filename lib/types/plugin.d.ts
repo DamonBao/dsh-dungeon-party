@@ -66,6 +66,7 @@ export declare const Config: z<Schemastery.ObjectS<{
         healerVerificationCommands: z<string[], string[]>;
         healerVerificationTimeoutMs: z<number, number>;
         fingerprintIgnoreScopes: z<string[], string[]>;
+        submitByproductScopes: z<string[], string[]>;
         validationRequired: z<boolean, boolean>;
     }>, Schemastery.ObjectT<{
         scopeEnforcementMode: z<"auto" | "telemetry" | "aggregate" | "serial", "auto" | "telemetry" | "aggregate" | "serial">;
@@ -92,6 +93,7 @@ export declare const Config: z<Schemastery.ObjectS<{
         healerVerificationCommands: z<string[], string[]>;
         healerVerificationTimeoutMs: z<number, number>;
         fingerprintIgnoreScopes: z<string[], string[]>;
+        submitByproductScopes: z<string[], string[]>;
         validationRequired: z<boolean, boolean>;
     }>>;
 }>, Schemastery.ObjectT<{
@@ -127,6 +129,7 @@ export declare const Config: z<Schemastery.ObjectS<{
         healerVerificationCommands: z<string[], string[]>;
         healerVerificationTimeoutMs: z<number, number>;
         fingerprintIgnoreScopes: z<string[], string[]>;
+        submitByproductScopes: z<string[], string[]>;
         validationRequired: z<boolean, boolean>;
     }>, Schemastery.ObjectT<{
         scopeEnforcementMode: z<"auto" | "telemetry" | "aggregate" | "serial", "auto" | "telemetry" | "aggregate" | "serial">;
@@ -153,6 +156,7 @@ export declare const Config: z<Schemastery.ObjectS<{
         healerVerificationCommands: z<string[], string[]>;
         healerVerificationTimeoutMs: z<number, number>;
         fingerprintIgnoreScopes: z<string[], string[]>;
+        submitByproductScopes: z<string[], string[]>;
         validationRequired: z<boolean, boolean>;
     }>>;
 }>>;
@@ -191,6 +195,7 @@ export declare class DungeonPartyService extends Service {
             healerVerificationCommands: z<string[], string[]>;
             healerVerificationTimeoutMs: z<number, number>;
             fingerprintIgnoreScopes: z<string[], string[]>;
+            submitByproductScopes: z<string[], string[]>;
             validationRequired: z<boolean, boolean>;
         }>, Schemastery.ObjectT<{
             scopeEnforcementMode: z<"auto" | "telemetry" | "aggregate" | "serial", "auto" | "telemetry" | "aggregate" | "serial">;
@@ -217,6 +222,7 @@ export declare class DungeonPartyService extends Service {
             healerVerificationCommands: z<string[], string[]>;
             healerVerificationTimeoutMs: z<number, number>;
             fingerprintIgnoreScopes: z<string[], string[]>;
+            submitByproductScopes: z<string[], string[]>;
             validationRequired: z<boolean, boolean>;
         }>>;
     }>, Schemastery.ObjectT<{
@@ -252,6 +258,7 @@ export declare class DungeonPartyService extends Service {
             healerVerificationCommands: z<string[], string[]>;
             healerVerificationTimeoutMs: z<number, number>;
             fingerprintIgnoreScopes: z<string[], string[]>;
+            submitByproductScopes: z<string[], string[]>;
             validationRequired: z<boolean, boolean>;
         }>, Schemastery.ObjectT<{
             scopeEnforcementMode: z<"auto" | "telemetry" | "aggregate" | "serial", "auto" | "telemetry" | "aggregate" | "serial">;
@@ -278,6 +285,7 @@ export declare class DungeonPartyService extends Service {
             healerVerificationCommands: z<string[], string[]>;
             healerVerificationTimeoutMs: z<number, number>;
             fingerprintIgnoreScopes: z<string[], string[]>;
+            submitByproductScopes: z<string[], string[]>;
             validationRequired: z<boolean, boolean>;
         }>>;
     }>>;

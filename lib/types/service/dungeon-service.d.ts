@@ -338,6 +338,12 @@ export interface DungeonConfig {
     healerVerificationCommands: string[];
     healerVerificationTimeoutMs: number;
     fingerprintIgnoreScopes: string[];
+    /**
+     * Workspace paths the serial submit audit excuses when the executor did not
+     * report them (toolchain byproducts such as lockfiles). They stay visible
+     * to snapshots/fingerprints; only the changedFiles equality relaxes.
+     */
+    submitByproductScopes: string[];
     validationRequired: boolean;
 }
 export interface DungeonWaitResult {
@@ -348,6 +354,8 @@ export interface DungeonWaitResult {
 export interface DungeonServiceOptions {
     eventStore: DungeonEventStore;
     idGenerator?: () => string;
+    /** Injectable auto run-id factory; defaults to {@link createReadableRunId}. */
+    runIdGenerator?: () => string;
     clock?: () => string;
     /** Injected artifact-existence probe so the core stays testable off-host. */
     fileExists?: (absolutePath: string) => boolean;
@@ -364,6 +372,19 @@ export interface StartRunInput {
     workspaceFingerprint: string;
     tankSessionId: string;
 }
+/**
+ * Human-readable, sortable default run id: `run-<UTC date>-<UTC time>-<8 hex>`.
+ * Child session ids and subagent descriptor labels embed the run id, so a
+ * readable run id keeps the whole party enumerable in the host UI instead of
+ * surfacing raw UUIDs. The 8-hex suffix carries 32 bits of entropy, which
+ * keeps same-second collision odds negligible for realistic burst starts.
+ */
+export declare function createReadableRunId(at?: Date, suffix?: string): string;
+/**
+ * Grace period a submit protection window keeps an expiring lease submittable
+ * and shielded from sweeps. Bounded so a crashed caller cannot pin a lease.
+ */
+export declare const SUBMIT_PROTECTION_GRACE_MS = 60000;
 export declare class DungeonError extends Error {
     readonly code: string;
     constructor(code: string, message: string);
@@ -374,6 +395,7 @@ export declare class DungeonService {
     private readonly runs;
     private readonly eventStore;
     private readonly idGenerator;
+    private readonly runIdGenerator;
     private readonly clock;
     private readonly fileExists;
     private readonly config;
@@ -381,13 +403,33 @@ export declare class DungeonService {
     private readonly sequenceCounters;
     /** Serializes two-phase completion per run so concurrent finishes cannot interleave. */
     private readonly completionLocks;
+    /**
+     * Open submit windows per run/task. While a window is open, sweeps may not
+     * revoke the task's lease and the submit itself tolerates a lease that
+     * expired during the audit, so work finished in a long turn is never lost
+     * to a concurrent poll-triggered sweep.
+     */
+    private readonly submitProtections;
     constructor(options: DungeonServiceOptions);
+    private runIdInUse;
     startRun(input: StartRunInput): DungeonRun;
     recoverRun(runId: string): DungeonRun;
     bindMember(actor: Actor, runId: string, slot: Exclude<PartySlot, 'tank'>, sessionId: string): DungeonRun;
     changePhase(actor: Actor, runId: string, nextPhase: RunPhase): DungeonRun;
     createTask(actor: Actor, runId: string, workOrder: WorkOrder): TaskRecord;
     preflightTaskAssignment(actor: Actor, runId: string, taskId: string, slot: DpsSlot): TaskRecord;
+    /**
+     * Serial scope mode can carry exactly one claimable write task at a time.
+     * True while another write task holds an active lease or is already
+     * assigned awaiting its claim; read-only tasks are never blocked.
+     */
+    serialWriteBlocked(runId: string, taskId: string): boolean;
+    private findSerialWriteBlocker;
+    /**
+     * Unified serial gate for every path that puts a write task into the
+     * claimable state (tank assignment, scheduler dispatch, reassignment).
+     */
+    private assertSerialWriteAssignable;
     assignTask(actor: Actor, runId: string, taskId: string, slot: DpsSlot): TaskRecord;
     claimTask(actor: Actor, runId: string, taskId: string): TaskLease;
     submitExecution(actor: Actor, runId: string, report: ExecutionReport): TaskRecord;
@@ -453,10 +495,28 @@ export declare class DungeonService {
     waitForChange(actor: Actor, runId: string, afterSequence: number, timeoutMs?: number, signal?: AbortSignal): Promise<DungeonWaitResult>;
     sendPartyMessage(actor: Actor, runId: string, toSlot: PartySlot, input: PartyMessageInput): PartyMessage;
     getFingerprintIgnoreScopes(): string[];
+    /** Paths the serial submit audit excuses as toolchain byproducts. */
+    getSubmitByproductScopes(): string[];
     /** Read-only healer verification allowlist for tool-layer preflight checks. */
     getHealerVerificationCommands(): string[];
     /** Read-only healer verification timeout cap for tool-layer preflight checks. */
     getHealerVerificationTimeoutMs(): number;
+    /** Window in which observed session activity counts as "recently working". */
+    getReadinessEvaluationWindowMs(): number;
+    /**
+     * Open a submit protection window for one task: sweeps skip its lease and
+     * `submitExecution` tolerates a lease that expires inside the window, so
+     * work finished in a long turn is never lost to a concurrent poll-triggered
+     * sweep. The window is anchored strictly at `lease.expiresAt + grace` — a
+     * lease already expired beyond the grace can never be re-protected, so a
+     * late `protectSubmit` cannot revive stale work. Callers release eagerly in
+     * a finally block.
+     */
+    protectSubmit(runId: string, taskId: string): void;
+    /** Close a submit protection window opened by {@link protectSubmit}. */
+    releaseSubmit(runId: string, taskId: string): void;
+    /** Epoch ms until which the task's submit window shields it, if open. */
+    private submitProtectedUntil;
     /** Enumerate in-memory run ids for watchdog sweeps and diagnostics. */
     listRunIds(): string[];
     /** Enumerate only mutable runs without cloning historical terminal state. */
