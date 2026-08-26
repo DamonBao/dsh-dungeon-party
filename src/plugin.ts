@@ -84,6 +84,7 @@ export const Config = z.object({
     healerVerificationCommands: z.array(z.string()).default(['npm test', 'npm run typecheck', 'npx tsc --noEmit', 'git status --short', 'git diff --stat', 'git diff --numstat']),
     healerVerificationTimeoutMs: positiveInteger().default(120_000),
     fingerprintIgnoreScopes: z.array(z.string()).default([...defaultDungeonConfig.fingerprintIgnoreScopes]),
+    submitByproductScopes: z.array(z.string()).default([...defaultDungeonConfig.submitByproductScopes]),
     validationRequired: z.boolean(),
   }),
 })
@@ -127,6 +128,9 @@ export class DungeonPartyService extends Service {
       }
     }
     ctx.on('session/event', (session, event) => {
+      // Any session event is an activity signal: the watchdog must not treat
+      // a long, event-emitting turn as a stall.
+      manager.observeSessionActivity(String(session.id))
       if (event.type !== 'turn/end') return
       const reason = event.data.reason
       const signals = core.observeAgentTurnEnd(String(session.id), reason.kind, [JSON.stringify(reason)])

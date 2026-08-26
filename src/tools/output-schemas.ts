@@ -181,6 +181,7 @@ const runTaskSummary: ValueSchemaSpec = {
     taskVersion: { type: 'integer', required: true },
     leaseVersion: { type: 'integer' },
     nextCheckpointDueAt: { type: 'string' },
+    currentTurnId: { type: 'string' },
     summary: { type: 'string' },
     modifiedAssertions: { type: 'array', items: modifiedAssertion },
   },
@@ -309,6 +310,7 @@ const healthTaskProgress: ValueSchemaSpec = {
     progressState: { type: 'string', enum: ['on-track', 'suspected-stalled', 'stalled'] },
     missedCheckpoints: { type: 'integer' },
     nextCheckpointDueAt: { type: 'string' },
+    currentTurnId: { type: 'string' },
   },
 }
 

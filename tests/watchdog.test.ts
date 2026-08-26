@@ -53,7 +53,7 @@ function setup(config = {}) {
     send: tankSend,
   }
   const agents = { get: (id: string) => id === 'tank' ? tankAgent : undefined }
-  const manager = new PartyAgentManager(service, agents as never, { composeFrom: vi.fn() } as never)
+  const manager = new PartyAgentManager(service, agents as never, { composeFrom: vi.fn() } as never, {}, () => now)
   return {
     service, manager, send, create,
     advance(ms: number) { now += ms },
@@ -192,8 +192,45 @@ describe('watchdog recovery semantics', () => {
     expect(sentTexts().some((text) => text.includes('Assigned dungeon-party work order'))).toBe(true)
   })
 
-  it('nudges a DPS that ended its turn on a dangling lease, rate-limited', async () => {
-    const { service, manager, send, sentTexts } = setup()
+  it('does not stall a leased task whose owner session showed recent activity', async () => {
+    const { service, manager, advance } = setup()
+    await managedParty(service, manager)
+
+    advance(241_000)
+    // The DPS turn is long, but the session is still emitting activity.
+    manager.observeSessionActivity('run-dps-1-g1')
+    await manager.runWatchdog()
+
+    expect(service.getRun('run').tasks.task!.progressState).toBe('on-track')
+    expect(service.getRun('run').tasks.task!.missedCheckpoints).toBe(0)
+  })
+
+  it('stalls once the owner session stays quiet beyond the activity window', async () => {
+    const { service, manager, advance } = setup()
+    await managedParty(service, manager)
+
+    manager.observeSessionActivity('run-dps-1-g1')
+    advance(241_000)
+    await manager.runWatchdog()
+
+    expect(service.getRun('run').tasks.task!.progressState).toBe('suspected-stalled')
+  })
+
+  it('includes the exact active turn id in the confirmed stall alert so party_interrupt is actionable', async () => {
+    const { service, manager, advance, tankTexts } = setup()
+    await managedParty(service, manager)
+    service.registerTaskTurn('run', 'task', 'turn-9')
+
+    advance(241_000)
+    await manager.runWatchdog()
+    advance(241_000)
+    await manager.runWatchdog()
+
+    expect(service.getRun('run').tasks.task!.progressState).toBe('stalled')
+    expect(tankTexts().some((text) => text.includes('stall confirmed') && text.includes('turn-9'))).toBe(true)
+  })
+
+  it('nudges a DPS that ended its turn on a dangling lease, rate-limited', async () => {    const { service, manager, send, sentTexts } = setup()
     await managedParty(service, manager)
 
     manager.nudgeAfterTurnEnd('run-dps-1-g1')

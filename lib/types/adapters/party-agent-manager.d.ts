@@ -2,11 +2,17 @@ import type { AgentRegistry } from '@deepseek-ai/dsh-agent';
 import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets';
 import { type Actor, type CheckpointRequest, type CommanderRescueTicket, type DungeonService, type ExecutionReport, type PartyMessage, type PartyMessageInput, type PartySlot, type RecoveryInstruction, type ResurrectionRequest, type RunPhase, type TaskLease, type TaskRecord } from '../service/dungeon-service.js';
 type ChildSlot = Exclude<PartySlot, 'tank'>;
+/**
+ * Short persona names used for durable agent identity (subagent descriptor
+ * labels). Keep in sync with `rolePersonas` and the client's `partyIdentity`.
+ */
+export declare const rolePersonaNames: Record<ChildSlot, string>;
 export declare class PartyAgentManager {
     private readonly service;
     private readonly agents;
     private readonly presets;
     private readonly childRoute;
+    private readonly clockMs;
     private readonly handles;
     private readonly commanderHandles;
     private readonly dispatchedRecoveryIds;
@@ -37,10 +43,21 @@ export declare class PartyAgentManager {
     private readonly guardBindings;
     /** Unexpected scheduler errors, kept for diagnostics instead of failing post-commit flows. */
     readonly schedulerErrors: unknown[];
+    /**
+     * Last observed activity (epoch ms) per session, fed from host session
+     * events. The watchdog treats a recently active owner as working, so a long
+     * turn can never be mistaken for a stall while it still emits events.
+     */
+    private readonly sessionActivity;
     constructor(service: DungeonService, agents: AgentRegistry, presets: AgentPresets, childRoute?: {
         provider?: string;
         model?: string;
-    });
+    }, clockMs?: () => number);
+    /** Record a host-observed activity signal for one session. */
+    observeSessionActivity(sessionId: string, atMs?: number): void;
+    /** Epoch ms of the latest observed activity for one session, if any. */
+    lastActivityAt(sessionId: string): number | undefined;
+    private recentlyActive;
     /**
      * Child agent model route: explicit childRoute config wins over the tank's
      * creation-time options (the tank's live UI-side model selection is not
@@ -62,6 +79,12 @@ export declare class PartyAgentManager {
      * rate-limited to one nudge per session per minute.
      */
     nudgeAfterTurnEnd(sessionId: string): void;
+    /**
+     * Dispatch fast-path prefilter; the authoritative gate lives in the service
+     * (`preflightTaskAssignment` / `reassignTask` / `claimTask`) and covers the
+     * tank's manual assignment path too.
+     */
+    private serialWriteBlocked;
     private withDispatchLock;
     private withWorkspaceAuditLock;
     private dispatchAvailableTasksUnlocked;

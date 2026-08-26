@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, matchesGlob, relative, resolve } from 'node:path'
 import type { Agent, AgentHandle, AgentRegistry } from '@deepseek-ai/dsh-agent'
@@ -47,6 +48,17 @@ const rolePersonas: Record<ChildSlot, string> = {
   healer: 'You are Lumina the Oracle, the independent Holy Adjudicator Validator (Healer). Inspect the current manifest and evidence, submit a complete validation report, and perform only authorized maintenance or resurrection. Do not modify implementation files or impersonate the Commander.',
 }
 
+/**
+ * Short persona names used for durable agent identity (subagent descriptor
+ * labels). Keep in sync with `rolePersonas` and the client's `partyIdentity`.
+ */
+export const rolePersonaNames: Record<ChildSlot, string> = {
+  'dps-1': 'Pyra',
+  'dps-2': 'Nyx',
+  'dps-3': 'Aster',
+  healer: 'Lumina',
+}
+
 export class PartyAgentManager {
   private readonly handles = new Map<string, AgentHandle>()
   private readonly commanderHandles = new Map<string, AgentHandle>()
@@ -78,13 +90,37 @@ export class PartyAgentManager {
   private readonly guardBindings = new WeakMap<Context, { runId: string; slot: DpsSlot }>()
   /** Unexpected scheduler errors, kept for diagnostics instead of failing post-commit flows. */
   readonly schedulerErrors: unknown[] = []
+  /**
+   * Last observed activity (epoch ms) per session, fed from host session
+   * events. The watchdog treats a recently active owner as working, so a long
+   * turn can never be mistaken for a stall while it still emits events.
+   */
+  private readonly sessionActivity = new Map<string, number>()
 
   constructor(
     private readonly service: DungeonService,
     private readonly agents: AgentRegistry,
     private readonly presets: AgentPresets,
     private readonly childRoute: { provider?: string; model?: string } = {},
+    private readonly clockMs: () => number = Date.now,
   ) {}
+
+  /** Record a host-observed activity signal for one session. */
+  observeSessionActivity(sessionId: string, atMs: number = this.clockMs()): void {
+    this.sessionActivity.set(sessionId, atMs)
+  }
+
+  /** Epoch ms of the latest observed activity for one session, if any. */
+  lastActivityAt(sessionId: string): number | undefined {
+    return this.sessionActivity.get(sessionId)
+  }
+
+  private recentlyActive(sessionId: string | undefined): boolean {
+    if (!sessionId) return false
+    const last = this.sessionActivity.get(sessionId)
+    if (last === undefined) return false
+    return this.clockMs() - last <= this.service.getReadinessEvaluationWindowMs()
+  }
 
   /**
    * Child agent model route: explicit childRoute config wins over the tank's
@@ -200,7 +236,7 @@ export class PartyAgentManager {
         const ownerBinding = swept.slots[task.ownerSlot]
         if (!ownerBinding.currentSessionId || ownerBinding.lifeState !== 'alive') continue
         const redispatchKey = `${runId}:${task.workOrder.id}`
-        const nowMs = Date.now()
+        const nowMs = this.clockMs()
         if (nowMs < (this.redispatchAt.get(redispatchKey) ?? 0)) continue
         this.redispatchAt.set(redispatchKey, nowMs + 5 * 60_000)
         try {
@@ -213,7 +249,11 @@ export class PartyAgentManager {
       for (const task of Object.values(swept.tasks)) {
         if (task.status !== 'running' || !task.activeLease || !task.ownerSlot) continue
         const before = task.progressState
-        this.service.evaluateTaskProgress(runId, task.workOrder.id, {})
+        // A recently active owner session is working, not stalled: long turns
+        // legitimately cannot emit member_checkpoint mid-turn.
+        this.service.evaluateTaskProgress(runId, task.workOrder.id, {
+          hasRecentActivity: this.recentlyActive(swept.slots[task.ownerSlot].currentSessionId),
+        })
         const after = this.service.getRun(runId).tasks[task.workOrder.id]
         if (!after || after.progressState === before) continue
         if (after.progressState === 'suspected-stalled') {
@@ -223,10 +263,13 @@ export class PartyAgentManager {
             // The DPS agent may not be live; the next watchdog pass retries.
           }
         } else if (after.progressState === 'stalled') {
+          const turnHint = after.currentTurnId
+            ? ` The exact active turn is ${after.currentTurnId}; party_interrupt requires this turnId verbatim.`
+            : ' The active turn id is unknown; call party_status to read currentTurnId before party_interrupt.'
           this.agents.get(tankSessionId as SessionId)?.send(createUserMessage({
             content: [{
               type: 'text',
-              text: `Task stall confirmed for ${task.workOrder.id} on ${task.ownerSlot}: ${after.missedCheckpoints ?? 0} missed checkpoints. Use party_request_checkpoint for evidence, or party_interrupt once the task is confirmed stalled.`,
+              text: `Task stall confirmed for ${task.workOrder.id} on ${task.ownerSlot}: ${after.missedCheckpoints ?? 0} missed checkpoints.${turnHint} Use party_request_checkpoint for evidence, or party_interrupt once the task is confirmed stalled.`,
             }],
             source: { kind: 'plugin', plugin: 'dsh-dungeon-party', form: 'relay' },
           }), 'next-step', true)
@@ -240,7 +283,7 @@ export class PartyAgentManager {
    * rate-limited to one nudge per session per minute.
    */
   nudgeAfterTurnEnd(sessionId: string): void {
-    const now = Date.now()
+    const now = this.clockMs()
     const last = this.turnEndNudges.get(sessionId)
     if (last !== undefined && now - last < 60_000) return
     for (const runId of this.service.listActiveRunIds()) {
@@ -268,6 +311,15 @@ export class PartyAgentManager {
       }), 'next-step', true)
       return
     }
+  }
+
+  /**
+   * Dispatch fast-path prefilter; the authoritative gate lives in the service
+   * (`preflightTaskAssignment` / `reassignTask` / `claimTask`) and covers the
+   * tank's manual assignment path too.
+   */
+  private serialWriteBlocked(runId: string, task: TaskRecord): boolean {
+    return this.service.serialWriteBlocked(runId, task.workOrder.id)
   }
 
   private async withDispatchLock<T>(runId: string, operation: () => Promise<T>): Promise<T> {
@@ -316,6 +368,10 @@ export class PartyAgentManager {
       .sort((left, right) => priority[left.workOrder.priority] - priority[right.workOrder.priority])
 
     for (const task of readyTasks) {
+      // Serial scope mode can carry exactly one claimable write task at a
+      // time. Dispatching more only creates claim contention (rejected
+      // work_claim retries), so queued write tasks wait for the active lease.
+      if (this.serialWriteBlocked(runId, task)) continue
       const slot = freeSlots.shift()
       if (!slot) break
       try {
@@ -662,12 +718,19 @@ export class PartyAgentManager {
   }
 
   async submitExecutionWithAudit(actor: Actor, runId: string, report: ExecutionReport): Promise<TaskRecord> {
-    return this.withWorkspaceAuditLock(runId, async () => {
-      await this.auditWorkspace(actor, runId, report)
-      const task = this.service.submitExecution(actor, runId, report)
-      this.completeLeaseAudit(runId, report.taskId)
-      return task
-    })
+    // Shield the lease for the duration of the audit+commit so a concurrent
+    // poll-triggered sweep cannot revoke the work mid-submit.
+    this.service.protectSubmit(runId, report.taskId)
+    try {
+      return await this.withWorkspaceAuditLock(runId, async () => {
+        await this.auditWorkspace(actor, runId, report)
+        const task = this.service.submitExecution(actor, runId, report)
+        this.completeLeaseAudit(runId, report.taskId)
+        return task
+      })
+    } finally {
+      this.service.releaseSubmit(runId, report.taskId)
+    }
   }
 
   async auditWorkspaceBeforeSubmit(actor: Actor, runId: string, report: ExecutionReport): Promise<void> {
@@ -718,6 +781,12 @@ export class PartyAgentManager {
     // re-baselines moved their deltas into `accumulated`, so pre-checkpoint
     // (and out-of-scope) changes can no longer be silently absorbed.
     const changedFiles = [...new Set([...audit.accumulated, ...diffWorkspaceSnapshots(audit.snapshot, current)])].sort()
+    // Byproduct exemption relaxes ONLY the serial changedFiles comparison for
+    // files inside the task's own scopes. It must never bypass the write-scope
+    // boundary: a byproduct-shaped change outside every active lease scope is
+    // still a violation.
+    const byproductScopes = this.service.getSubmitByproductScopes()
+    const isByproduct = (path: string) => byproductScopes.some((scope) => path === scope || matchesGlob(path, scope))
     const activeScopes = Object.values(run.tasks).flatMap((task) => task.activeLease ? task.workOrder.writeScopes : [])
     const outsideActiveScopes = changedFiles.filter((path) =>
       !activeScopes.some((scope) => path === scope || matchesGlob(path, scope)),
@@ -732,9 +801,20 @@ export class PartyAgentManager {
       const reported = [...new Set(report.changedFiles)].sort()
       const actual = changedFiles.filter((path) =>
         run.tasks[report.taskId]!.workOrder.writeScopes.some((scope) => path === scope || matchesGlob(path, scope)),
-      )
-      if (JSON.stringify(reported) !== JSON.stringify(actual)) {
-        throw new DungeonError('CHANGED_FILES_MISMATCH', 'Reported changedFiles do not match the host-observed serial workspace delta')
+      ).sort()
+      // Strict equality is unachievable in a live workspace: toolchains drop
+      // byproducts the executor cannot foresee. Excuse configured byproducts,
+      // and report the exact delta otherwise so the executor can correct the
+      // report instead of guessing.
+      const reportedSet = new Set(reported)
+      const actualSet = new Set(actual)
+      const unreported = actual.filter((path) => !reportedSet.has(path) && !isByproduct(path))
+      const overReported = reported.filter((path) => !actualSet.has(path))
+      if (unreported.length > 0 || overReported.length > 0) {
+        throw new DungeonError(
+          'CHANGED_FILES_MISMATCH',
+          `Reported changedFiles do not match the host-observed serial workspace delta. Unreported changes: [${boundedPathList(unreported)}]; reported but not observed: [${boundedPathList(overReported)}]. Toolchain byproducts are excused automatically; correct the list and resubmit.`,
+        )
       }
     }
   }
@@ -980,7 +1060,10 @@ export class PartyAgentManager {
     agent.session.append('subagent/descriptor', snapshotSubagentDescriptor({
       mode: 'continuable',
       provider: 'dungeon-party',
-      label: `${runId} · ${slot}`,
+      // Persona name + slot stays human-readable; the short run tag keeps
+      // same-persona members of different runs distinguishable without
+      // resurfacing the full run id.
+      label: `${rolePersonaNames[slot]} · ${slot} · ${shortRunTag(runId)}`,
       ...agent.options.provider ? { agentProvider: agent.options.provider } : {},
       ...agent.options.model ? { agentModel: agent.options.model } : {},
       persona: rolePersonas[slot],
@@ -1062,6 +1145,21 @@ export class PartyAgentManager {
 
 function keyFor(runId: string, slot: ChildSlot): string {
   return `${runId}:${slot}`
+}
+
+/** Cap diagnostic path lists so a huge delta cannot blow up an error body. */
+function boundedPathList(paths: string[], limit = 20): string {
+  if (paths.length <= limit) return paths.join(', ')
+  return `${paths.slice(0, limit).join(', ')}, … (${paths.length - limit} more)`
+}
+
+/**
+ * Short distinguishing tag of a run id for descriptor labels: a truncated
+ * hash of the FULL run id. Trailing-segment extraction would collapse
+ * custom ids like `alpha-prod` and `beta-prod` onto the same label.
+ */
+function shortRunTag(runId: string): string {
+  return createHash('sha256').update(runId).digest('hex').slice(0, 8)
 }
 
 /**
