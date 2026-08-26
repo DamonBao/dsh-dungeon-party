@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, matchesGlob, relative, resolve } from 'node:path'
 import type { Agent, AgentHandle, AgentRegistry } from '@deepseek-ai/dsh-agent'
@@ -1153,13 +1154,12 @@ function boundedPathList(paths: string[], limit = 20): string {
 }
 
 /**
- * Short distinguishing tag of a run id for descriptor labels: the trailing
- * random segment of a readable id (`run-<date>-<time>-<tag>`), or a bounded
- * tail of arbitrary ids.
+ * Short distinguishing tag of a run id for descriptor labels: a truncated
+ * hash of the FULL run id. Trailing-segment extraction would collapse
+ * custom ids like `alpha-prod` and `beta-prod` onto the same label.
  */
 function shortRunTag(runId: string): string {
-  const tag = runId.includes('-') ? runId.slice(runId.lastIndexOf('-') + 1) : runId
-  return tag.slice(0, 12) || runId.slice(-6)
+  return createHash('sha256').update(runId).digest('hex').slice(0, 8)
 }
 
 /**

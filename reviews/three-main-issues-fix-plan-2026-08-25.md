@@ -197,9 +197,9 @@
 
 | 编号 | 修复点 | 实现位置 | 覆盖测试 |
 |---|---|---|---|
-| 1.1 | 可读默认 runId `run-<UTC日期>-<UTC时间>-<4hex>` | `src/service/dungeon-service.ts` 新增 `createReadableRunId`，`startRun` 默认改用它 | `dungeon-service.test.ts` 格式确定性 + 缺省唯一性 2 例 |
+| 1.1 | 可读默认 runId `run-<UTC日期>-<UTC时间>-<8hex>`（32 bit 熵，碰撞有界重试，可注入 `runIdGenerator`） | `src/service/dungeon-service.ts` 新增 `createReadableRunId`，`startRun` 默认改用它 | `dungeon-service.test.ts` 格式确定性 + 缺省唯一性 + 碰撞重试 3 例 |
 | 1.2 | 统一 runId 生成 | `src/tools/register.ts` `party_recover` 重启分支改用 `createReadableRunId`，移除 `randomUUID` 依赖 | 随 `dsh-tools.test.ts` 回归 |
-| 1.3 | descriptor label 人设名 | `party-agent-manager.ts` 新增 `rolePersonaNames`（Pyra/Nyx/Aster/Lumina），label 改为 `Pyra · dps-1` 形态 | `agent-manager.test.ts` 四槽位 label 断言（原宽松断言收紧） |
+| 1.3 | descriptor label 人设名 | `party-agent-manager.ts` 新增 `rolePersonaNames`（Pyra/Nyx/Aster/Lumina），label 为 `Pyra · dps-1 · <run哈希8位>` 形态（哈希覆盖全 runId，跨 run/自定义 id 均不碰撞） | `agent-manager.test.ts` 四槽位 label 断言（原宽松断言收紧） |
 | 2.1 | 看门狗接线活动信号 | `PartyAgentManager` 增加 `clockMs` 注入、`observeSessionActivity`/`lastActivityAt`，`runWatchdog` 评估时传 `hasRecentActivity`（窗口=`readinessEvaluationWindowMs`）；`plugin.ts` 将所有 `session/event` 转发为活动信号；服务新增 `getReadinessEvaluationWindowMs` | `watchdog.test.ts` 活跃豁免/静默判停 2 例；`cordis-plugin.test.ts` 接线断言 |
 | 2.2 | 暴露 `currentTurnId` | `summarizeRun` tasks、`party_health` taskProgress 增加 `currentTurnId`；`output-schemas.ts` 两处补字段；stall 告警文案携带精确 turnId 与 `party_interrupt` 指引 | `dsh-tools.test.ts` 工具输出断言；`watchdog.test.ts` 告警含 `turn-9` |
 | 2.3 | serial 排队派发 | `dispatchAvailableTasksUnlocked` 经 `serialWriteBlocked`（读实时 run 状态）跳过已有活跃写租约/已分配待领的写任务；`WRITE_DISPATCH_SERIALIZED` 文案指引 `party_wait` | `agent-manager.test.ts` 排队/续派 2 例 + 改写双分配回归用例；`dungeon-service.test.ts` 文案断言 |
@@ -211,8 +211,8 @@
 **行为变更提示**（对部署方可见）：
 - `fingerprintIgnoreScopes` 配置语义从“替换”变为“与默认合并”，依赖旧替换语义排除默认项的部署需复核（第 5 节缓解配置示例已按合并语义给出）。
 - serial 模式下并行派发多写任务不再发生：第二个写任务保持 `pending` 直到首个写租约提交/失效；依赖旧“三写并行派发”行为的集成需适配。
-- 子代理枚举标签由 `<uuid> · <slot>` 变为 `<人设名> · <slot>`；若有外部系统按旧标签解析需适配。
-- 未配置 `runId` 的 run 从裸 UUID 变为 `run-<UTC日期>-<UTC时间>-<4hex>`。
+- 子代理枚举标签由 `<uuid> · <slot>` 变为 `<人设名> · <slot> · <run哈希8位>`；若有外部系统按旧标签解析需适配。
+- 未配置 `runId` 的 run 从裸 UUID 变为 `run-<UTC日期>-<UTC时间>-<8hex>`；自动 id 碰撞 8 次重试耗尽时抛 `RUN_ID_GENERATION_EXHAUSTED`（不再静默幂等复用已有 run）。
 
 **未实施（后续排期）**：1.4（session/title）、1.5（人设单一数据源）、1.6 已随 1.3 收紧、2.4、2.5、2.6、2.7、3.5、3.6、3.7。
 
@@ -227,3 +227,13 @@
 | 已过期任意时长的 lease 可被 `protectSubmit` 重新保护（`Math.max(now, expiresAt)`） | P1 | 窗口严格锚定 `lease.expiresAt + grace`（60s）；超过宽限后 `protectSubmit` 不再产生新窗口，陈旧租约可被 sweep、不可提交 | `dungeon-service.test.ts`：超宽限再保护被拒用例；在途提交用例改到 640s（宽限内） |
 | 默认 run ID 仅 16 bit 随机熵（4 hex） | P2 | 后缀扩为 8 hex（32 bit）；`startRun` 自动 id 碰撞时有界重试（≤8 次，检查内存与事件存储）；新增可注入 `runIdGenerator` 选项 | `dungeon-service.test.ts`：格式正则收紧 + 碰撞重试用例 |
 | descriptor label 多 run 不可区分 | P2 | label 追加短 run 标识：可读 runId 取末段随机后缀（如 `deadbeef`），任意 id 取有界尾部；形如 `Pyra · dps-1 · deadbeef` | `agent-manager.test.ts`：既有 label 断言更新 + 跨 run 消歧用例 |
+
+## 9. 边界复审修复（2026-08-25 第三轮，TDD）
+
+第二轮修复在新建 run 的正常路径上成立；本轮处理 3 个边界问题并修正第 7 节的过时表述（`<4hex>`、旧 label 格式）。测试总数 201 → 204。
+
+| 发现 | 等级 | 修复 | 覆盖测试 |
+|---|---|---|---|
+| 升级后遗留状态互锁：旧版本持久化的“多个写任务同时 ready+ownerSlot”恢复后互相视为 blocker，所有 claim 被拒且无 unassign 路径 | P1 | `findSerialWriteBlocker` 引入确定性队首规则：等待认领的写任务按持久任务序取最早者为队首，队首可 claim，其余继续排队（租约持有者优先于队首判定）；无需迁移数据 | `dungeon-service.test.ts`：手工注入遗留 `task-assigned` 事件重建旧状态 → 队首可 claim、第二个被拒、队首提交后续接 |
+| 自动 ID 重试耗尽后静默走幂等路径，可能复用参数相同的已有 run | P2 | 重试耗尽（8 次）仍碰撞时抛 `RUN_ID_GENERATION_EXHAUSTED`；未提供 runId 的调用方永不进入幂等复用；新增 `runIdInUse` 谓词（内存 + 事件存储） | `dungeon-service.test.ts`：恒碰撞生成器 → 明确报错用例 |
+| 自定义 runId 共享尾段时标签仍碰撞（`alpha-prod`/`beta-prod` → `prod`） | P2 | `shortRunTag` 改为对**完整 runId** 做 SHA-256 截取 8 位十六进制，不再取最后一个 `-` 分段 | `agent-manager.test.ts`：label 断言全部改哈希形式 + 尾段共享消歧用例 |

@@ -288,6 +288,74 @@ describe('DungeonService', () => {
     expect(run.id).toBe('fresh')
   })
 
+  it('admits the deterministic queue head when legacy state holds multiple assigned write tasks', () => {
+    const { service, persisted } = setup()
+    const run = service.startRun({
+      runId: 'run-1', objective: 'Build', workspaceRoot: process.cwd(),
+      workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
+    })
+    service.bindMember(tank, run.id, 'healer', healer.sessionId)
+    service.bindMember(tank, run.id, 'dps-1', dps1.sessionId)
+    service.bindMember(tank, run.id, 'dps-2', 'session-dps-2')
+    service.changePhase(tank, run.id, 'PLANNING')
+    service.createTask(tank, run.id, task())
+    service.createTask(tank, run.id, task({
+      id: 'task-2', writeScopes: ['tests/**'],
+      acceptanceCriteria: [{ id: 'task-2:works', description: 'Second works', required: true }],
+    }))
+    service.changePhase(tank, run.id, 'EXECUTING')
+    service.assignTask(tank, run.id, 'task-1', 'dps-1')
+    // Simulate a pre-serial-gate persisted run: a second write task assigned
+    // while the first was still awaiting its claim.
+    persisted.push({
+      eventId: 'legacy-assign', runId: run.id, sequence: persisted.length + 1, schemaVersion: 1,
+      type: 'dungeon/task-assigned', occurredAt: '2025-01-01T00:00:00.000Z',
+      payload: { taskId: 'task-2', ownerSlot: 'dps-2' }, actorSessionId: tank.sessionId,
+    } as DungeonEvent)
+    expect(service.recoverRun(run.id).tasks['task-2']!.ownerSlot).toBe('dps-2')
+
+    // Without a queue-head rule both tasks would treat each other as the
+    // blocker and every work_claim would be rejected forever. The earliest
+    // task in durable order is admitted; the second stays serialized.
+    service.claimTask(dps1, run.id, 'task-1')
+    expect(() => service.claimTask({ sessionId: 'session-dps-2' }, run.id, 'task-2')).toThrowError(
+      expect.objectContaining({ code: 'WRITE_DISPATCH_SERIALIZED' }),
+    )
+
+    // Once the head drains, the second task becomes claimable.
+    const lease = service.getRun(run.id).tasks['task-1']!.activeLease!
+    service.submitExecution(dps1, run.id, {
+      taskId: 'task-1', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
+      slot: 'dps-1', generation: 1, status: 'completed', summary: 'Done',
+      changedFiles: ['src/service/dungeon-service.ts'], evidence: ['done'], commandsRun: [], risks: [], remainingWork: [],
+    })
+    expect(service.claimTask({ sessionId: 'session-dps-2' }, run.id, 'task-2').ownerSlot).toBe('dps-2')
+  })
+
+  it('fails auto run-id generation instead of silently reusing a collided run', () => {
+    const persisted: DungeonEvent[] = []
+    const service = new DungeonService({
+      eventStore: {
+        append(event) { persisted.push(structuredClone(event)) },
+        load(runId) { return persisted.filter((event) => event.runId === runId).map((event) => structuredClone(event)) },
+      },
+      idGenerator: (() => { let id = 0; return () => `id-${++id}` })(),
+      clock: () => '2025-01-01T00:00:00.000Z',
+      runIdGenerator: () => 'dup',
+    })
+    service.startRun({
+      runId: 'dup', objective: 'Existing', workspaceRoot: process.cwd(),
+      workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
+    })
+
+    // A caller that never supplied a runId must never be folded into an
+    // existing run by the idempotency path.
+    expect(() => service.startRun({
+      objective: 'Build', workspaceRoot: process.cwd(),
+      workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
+    })).toThrowError(expect.objectContaining({ code: 'RUN_ID_GENERATION_EXHAUSTED' }))
+  })
+
   it('waits from an event cursor and returns only newer durable events', async () => {
     const { service } = setup()
     const run = service.startRun({

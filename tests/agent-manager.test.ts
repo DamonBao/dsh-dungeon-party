@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -5,6 +6,8 @@ import { describe, expect, it, vi, type Mock } from 'vitest'
 
 import { PartyAgentManager } from '../src/adapters/party-agent-manager.js'
 import { DungeonService, type DungeonEvent, type WorkOrder } from '../src/service/dungeon-service.js'
+
+const runTag = (runId: string) => createHash('sha256').update(runId).digest('hex').slice(0, 8)
 
 function setup(workspaceRoot = '/workspace', clock: () => string = () => '2025-01-01T00:00:00.000Z') {
   const events: DungeonEvent[] = []
@@ -100,7 +103,7 @@ describe('PartyAgentManager', () => {
       version: 2,
       mode: 'continuable',
       provider: 'dungeon-party',
-      label: 'Pyra · dps-1 · run',
+      label: `Pyra · dps-1 · ${runTag('run')}`,
       agentProvider: 'deepseek',
       agentModel: 'deepseek-chat',
     }))
@@ -114,7 +117,8 @@ describe('PartyAgentManager', () => {
     await manager.ensureMember({ sessionId: 'tank' }, 'run', 'dps-3')
 
     const labels = descriptorAppend.mock.calls.map((call) => (call[1] as { label: string }).label)
-    expect(labels).toEqual(['Lumina · healer · run', 'Nyx · dps-2 · run', 'Aster · dps-3 · run'])
+    const tag = runTag('run')
+    expect(labels).toEqual([`Lumina · healer · ${tag}`, `Nyx · dps-2 · ${tag}`, `Aster · dps-3 · ${tag}`])
   })
 
   it('disambiguates same-persona members across runs with a short run tag', async () => {
@@ -127,7 +131,23 @@ describe('PartyAgentManager', () => {
     await manager.ensureMember({ sessionId: 'tank' }, 'run-20260825-101010-deadbeef', 'dps-1')
 
     const labels = descriptorAppend.mock.calls.map((call) => (call[1] as { label: string }).label)
-    expect(labels).toContain('Pyra · dps-1 · deadbeef')
+    expect(labels).toContain(`Pyra · dps-1 · ${runTag('run-20260825-101010-deadbeef')}`)
+  })
+
+  it('keeps labels distinct for custom run ids sharing a trailing segment', async () => {
+    const { service, manager, descriptorAppend } = setup()
+    for (const runId of ['alpha-prod', 'beta-prod'] as const) {
+      service.startRun({
+        runId, objective: `Run ${runId}`, workspaceRoot: '/workspace',
+        workspaceFingerprint: 'v1', tankSessionId: 'tank',
+      })
+      await manager.ensureMember({ sessionId: 'tank' }, runId, 'dps-1')
+    }
+
+    const labels = descriptorAppend.mock.calls.map((call) => (call[1] as { label: string }).label)
+    expect(labels).toContain(`Pyra · dps-1 · ${runTag('alpha-prod')}`)
+    expect(labels).toContain(`Pyra · dps-1 · ${runTag('beta-prod')}`)
+    expect(new Set(labels).size).toBe(2)
   })
 
   it('proactively wakes the healer when validation starts', async () => {

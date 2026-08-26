@@ -707,6 +707,10 @@ export class DungeonService {
     for (const runId of this.eventStore.listRunIds?.() ?? []) this.recoverRun(runId)
   }
 
+  private runIdInUse(runId: string): boolean {
+    return this.runs.has(runId) || this.eventStore.load(runId).length > 0
+  }
+
   startRun(input: StartRunInput): DungeonRun {
     assert(typeof input.objective === 'string' && input.objective.trim(), 'INVALID_OBJECTIVE', 'Run objective is required')
     assert(input.tankSessionId, 'INVALID_TANK', 'Tank session is required')
@@ -714,15 +718,15 @@ export class DungeonService {
     if (runId === undefined) {
       // Bounded collision retry: same-second bursts share the timestamp part,
       // so the random suffix decides; a hit must not surface as a confusing
-      // idempotency conflict on a run the caller never started.
-      runId = this.runIdGenerator()
-      for (
-        let attempts = 0;
-        attempts < 8 && (this.runs.has(runId) || this.eventStore.load(runId).length > 0);
-        attempts += 1
-      ) {
-        runId = this.runIdGenerator()
+      // idempotency conflict on a run the caller never started. Exhaustion is
+      // an explicit failure — a caller that supplied no runId must never be
+      // folded into someone else's run by the idempotency path below.
+      let candidate = this.runIdGenerator()
+      for (let attempts = 0; attempts < 8 && this.runIdInUse(candidate); attempts += 1) {
+        candidate = this.runIdGenerator()
       }
+      assert(!this.runIdInUse(candidate), 'RUN_ID_GENERATION_EXHAUSTED', 'Could not generate a unique run id after 8 attempts; pass an explicit runId')
+      runId = candidate
     }
     const storedEvents = this.eventStore.load(runId)
     const existing = this.runs.get(runId) ?? (storedEvents.length > 0 ? this.recoverRun(runId) : undefined)
@@ -926,11 +930,24 @@ export class DungeonService {
   private findSerialWriteBlocker(run: DungeonRun, task: TaskRecord): TaskRecord | undefined {
     if (run.scopeEnforcementMode !== 'serial') return undefined
     if (task.workOrder.writeScopes.length === 0) return undefined
-    return Object.values(run.tasks).find((candidate) =>
+    const leasedBlocker = Object.values(run.tasks).find((candidate) =>
       candidate.workOrder.id !== task.workOrder.id &&
       candidate.workOrder.writeScopes.length > 0 &&
-      (candidate.activeLease !== undefined || (candidate.status === 'ready' && candidate.ownerSlot !== undefined)),
+      candidate.activeLease !== undefined,
     )
+    if (leasedBlocker) return leasedBlocker
+    // Legacy (pre-serial-gate) persisted runs may hold several write tasks in
+    // the assigned-awaiting-claim state at once. Admit a deterministic queue
+    // head — the earliest such task in durable task order — so the run cannot
+    // interlock with every task blocking every other; the rest keep waiting.
+    const awaiting = Object.values(run.tasks).filter((candidate) =>
+      candidate.workOrder.writeScopes.length > 0 &&
+      candidate.status === 'ready' &&
+      candidate.ownerSlot !== undefined,
+    )
+    const head = awaiting[0]
+    if (!head || head.workOrder.id === task.workOrder.id) return undefined
+    return head
   }
 
   /**
