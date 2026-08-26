@@ -663,3 +663,36 @@ describe('verification_run real execution', () => {
     expect(service.getRun('run').verificationRuns).toHaveLength(0)
   }, 15_000)
 })
+
+describe('tank visibility into active turns', () => {
+  it('exposes currentTurnId in party_status and party_health so interrupts are actionable', async () => {
+    const { service, definitions } = setup()
+    const start = definitions.find((definition) => definition.name === 'party_start')!
+    const status = definitions.find((definition) => definition.name === 'party_status')!
+    const health = definitions.find((definition) => definition.name === 'party_health')!
+    await start.execute({ runId: 'run', objective: 'Build', workspaceRoot: process.cwd() }, execution('tank'))
+    service.bindMember({ sessionId: 'tank' }, 'run', 'healer', 'session-healer')
+    service.bindMember({ sessionId: 'tank' }, 'run', 'dps-1', 'session-dps-1')
+    service.changePhase({ sessionId: 'tank' }, 'run', 'PLANNING')
+    service.createTask({ sessionId: 'tank' }, 'run', {
+      id: 'task-1', runId: 'run', version: 1, title: 'Implement', objective: 'Implement it',
+      inputs: [], constraints: [], acceptanceCriteria: [{ id: 'task-1:done', description: 'Done', required: true }],
+      readScopes: ['src/**'], writeScopes: ['src/**'], blockedBy: [], expectedArtifacts: [],
+      priority: 'normal', required: true,
+    })
+    service.changePhase({ sessionId: 'tank' }, 'run', 'EXECUTING')
+    service.assignTask({ sessionId: 'tank' }, 'run', 'task-1', 'dps-1')
+    service.claimTask({ sessionId: 'session-dps-1' }, 'run', 'task-1')
+    service.registerTaskTurn('run', 'task-1', 'turn-7')
+
+    const statusResult = await status.execute({ runId: 'run' }, execution('tank')) as {
+      tasks: Array<{ id: string; currentTurnId?: string }>
+    }
+    expect(statusResult.tasks.find((item) => item.id === 'task-1')?.currentTurnId).toBe('turn-7')
+
+    const healthResult = await health.execute({ runId: 'run' }, execution('tank')) as {
+      taskProgress: Array<{ taskId: string; currentTurnId?: string }>
+    }
+    expect(healthResult.taskProgress.find((item) => item.taskId === 'task-1')?.currentTurnId).toBe('turn-7')
+  })
+})

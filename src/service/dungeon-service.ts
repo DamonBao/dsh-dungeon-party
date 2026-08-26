@@ -385,6 +385,12 @@ export interface DungeonConfig {
   healerVerificationCommands: string[]
   healerVerificationTimeoutMs: number
   fingerprintIgnoreScopes: string[]
+  /**
+   * Workspace paths the serial submit audit excuses when the executor did not
+   * report them (toolchain byproducts such as lockfiles). They stay visible
+   * to snapshots/fingerprints; only the changedFiles equality relaxes.
+   */
+  submitByproductScopes: string[]
   validationRequired: boolean
 }
 
@@ -414,6 +420,29 @@ export interface StartRunInput {
   workspaceFingerprint: string
   tankSessionId: string
 }
+
+/**
+ * Human-readable, sortable default run id: `run-<UTC date>-<UTC time>-<4 hex>`.
+ * Child session ids and subagent descriptor labels embed the run id, so a
+ * readable run id keeps the whole party enumerable in the host UI instead of
+ * surfacing raw UUIDs.
+ */
+export function createReadableRunId(at: Date = new Date(), suffix: string = defaultRunIdSuffix()): string {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const date = `${at.getUTCFullYear()}${pad(at.getUTCMonth() + 1)}${pad(at.getUTCDate())}`
+  const time = `${pad(at.getUTCHours())}${pad(at.getUTCMinutes())}${pad(at.getUTCSeconds())}`
+  return `run-${date}-${time}-${suffix}`
+}
+
+function defaultRunIdSuffix(): string {
+  return crypto.randomUUID().slice(0, 4)
+}
+
+/**
+ * Grace period a submit protection window keeps an expiring lease submittable
+ * and shielded from sweeps. Bounded so a crashed caller cannot pin a lease.
+ */
+export const SUBMIT_PROTECTION_GRACE_MS = 60_000
 
 export class DungeonError extends Error {
   constructor(
@@ -453,6 +482,14 @@ export const defaultDungeonConfig: Readonly<DungeonConfig> = {
   healerVerificationTimeoutMs: 120_000,
   fingerprintIgnoreScopes: [
     '.git/**', 'node_modules/**', '.npm-cache/**', 'lib/**', 'dist/**', 'coverage/**', '.dsh/dungeon-party/tmp/**',
+    // Common toolchain byproducts a lease may generate without the executor
+    // reporting them; they must never break the submit audit.
+    'tsconfig.tsbuildinfo', '.eslintcache', 'test-results/**', 'playwright-report/**',
+    '.pytest_cache/**', '__pycache__/**', 'build/**', '.next/**', '*.log', '.DS_Store',
+  ],
+  submitByproductScopes: [
+    'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock',
+    '*.tsbuildinfo', '.eslintcache', '*.log', '.DS_Store',
   ],
   validationRequired: true,
 }
@@ -461,9 +498,17 @@ export function resolveDungeonConfig(input: Partial<DungeonConfig>): DungeonConf
   const config: DungeonConfig = {
     ...defaultDungeonConfig,
     ...input,
-    fingerprintIgnoreScopes: input.fingerprintIgnoreScopes?.length
-      ? [...input.fingerprintIgnoreScopes]
-      : [...defaultDungeonConfig.fingerprintIgnoreScopes],
+    // Custom ignore scopes extend the defaults instead of replacing them: a
+    // partial override that drops node_modules/** would make every audit walk
+    // (and hash) the whole dependency tree.
+    fingerprintIgnoreScopes: [...new Set([
+      ...defaultDungeonConfig.fingerprintIgnoreScopes,
+      ...(input.fingerprintIgnoreScopes ?? []),
+    ])],
+    submitByproductScopes: [...new Set([
+      ...defaultDungeonConfig.submitByproductScopes,
+      ...(input.submitByproductScopes ?? []),
+    ])],
   }
   assert(
     ['auto', 'telemetry', 'aggregate', 'serial'].includes(config.scopeEnforcementMode),
@@ -516,6 +561,9 @@ export function resolveDungeonConfig(input: Partial<DungeonConfig>): DungeonConf
   assert(config.taskLeaseDurationMs > minimumLease, 'INVALID_CONFIG', 'taskLeaseDurationMs must exceed all checkpoint observation windows')
   for (const scope of config.fingerprintIgnoreScopes) {
     assert(isSafeScope(scope), 'INVALID_CONFIG', `Unsafe fingerprint ignore scope: ${scope}`)
+  }
+  for (const scope of config.submitByproductScopes) {
+    assert(isSafeScope(scope), 'INVALID_CONFIG', `Unsafe submit byproduct scope: ${scope}`)
   }
   return config
 }
@@ -633,6 +681,13 @@ export class DungeonService {
   private readonly sequenceCounters = new Map<string, number>()
   /** Serializes two-phase completion per run so concurrent finishes cannot interleave. */
   private readonly completionLocks = new Map<string, Promise<unknown>>()
+  /**
+   * Open submit windows per run/task. While a window is open, sweeps may not
+   * revoke the task's lease and the submit itself tolerates a lease that
+   * expired during the audit, so work finished in a long turn is never lost
+   * to a concurrent poll-triggered sweep.
+   */
+  private readonly submitProtections = new Map<string, Map<string, string>>()
 
   constructor(options: DungeonServiceOptions) {
     this.eventStore = options.eventStore
@@ -650,7 +705,7 @@ export class DungeonService {
   startRun(input: StartRunInput): DungeonRun {
     assert(typeof input.objective === 'string' && input.objective.trim(), 'INVALID_OBJECTIVE', 'Run objective is required')
     assert(input.tankSessionId, 'INVALID_TANK', 'Tank session is required')
-    const runId = input.runId ?? this.idGenerator()
+    const runId = input.runId ?? createReadableRunId()
     const storedEvents = this.eventStore.load(runId)
     const existing = this.runs.get(runId) ?? (storedEvents.length > 0 ? this.recoverRun(runId) : undefined)
     if (existing) {
@@ -883,7 +938,7 @@ export class DungeonService {
         candidate.workOrder.writeScopes.length > 0 &&
         candidate.activeLease,
       )
-      assert(!anotherWriter, 'WRITE_DISPATCH_SERIALIZED', `Strict scope mode serializes write leases; ${anotherWriter?.workOrder.id} is active`)
+      assert(!anotherWriter, 'WRITE_DISPATCH_SERIALIZED', `Strict scope mode serializes write leases; ${anotherWriter?.workOrder.id} is active. Wait with party_wait until the active lease completes instead of retrying work_claim.`)
     }
     const grantedAt = this.clock()
     const lease: TaskLease = {
@@ -926,7 +981,14 @@ export class DungeonService {
       'STALE_LEASE',
       'Execution report lease does not match the active lease',
     )
-    assert(Date.parse(this.clock()) <= Date.parse(task.activeLease.expiresAt), 'LEASE_EXPIRED', 'Task lease has expired')
+    const submitNowMs = Date.parse(this.clock())
+    const protectedUntilMs = this.submitProtectedUntil(runId, report.taskId, submitNowMs)
+    assert(
+      submitNowMs <= Date.parse(task.activeLease.expiresAt) ||
+        (protectedUntilMs !== undefined && submitNowMs <= protectedUntilMs),
+      'LEASE_EXPIRED',
+      'Task lease has expired',
+    )
     assert(typeof report.summary === 'string' && report.summary.trim(), 'INVALID_REPORT', 'Execution summary is required')
     assert(
       Array.isArray(report.changedFiles) && Array.isArray(report.evidence) && Array.isArray(report.commandsRun) &&
@@ -1206,6 +1268,9 @@ export class DungeonService {
     const now = Date.parse(this.clock())
     for (const task of Object.values(run.tasks)) {
       if (task.activeLease && now > Date.parse(task.activeLease.expiresAt)) {
+        // An open submit window shields the lease: the executor is mid-submit
+        // and a poll-triggered sweep must not revoke the work under it.
+        if (this.submitProtectedUntil(runId, task.workOrder.id, now)) continue
         this.append(run, 'dungeon/task-lease-revoked', {
           taskId: task.workOrder.id,
           leaseId: task.activeLease.leaseId,
@@ -2032,6 +2097,11 @@ export class DungeonService {
     return clone(this.config.fingerprintIgnoreScopes)
   }
 
+  /** Paths the serial submit audit excuses as toolchain byproducts. */
+  getSubmitByproductScopes(): string[] {
+    return clone(this.config.submitByproductScopes)
+  }
+
   /** Read-only healer verification allowlist for tool-layer preflight checks. */
   getHealerVerificationCommands(): string[] {
     return clone(this.config.healerVerificationCommands)
@@ -2040,6 +2110,48 @@ export class DungeonService {
   /** Read-only healer verification timeout cap for tool-layer preflight checks. */
   getHealerVerificationTimeoutMs(): number {
     return this.config.healerVerificationTimeoutMs
+  }
+
+  /** Window in which observed session activity counts as "recently working". */
+  getReadinessEvaluationWindowMs(): number {
+    return this.config.readinessEvaluationWindowMs
+  }
+
+  /**
+   * Open a submit protection window for one task: sweeps skip its lease and
+   * `submitExecution` tolerates a lease that expires inside the window, so
+   * work finished in a long turn is never lost to a concurrent poll-triggered
+   * sweep. The window is anchored at the lease expiry (never earlier than
+   * now) plus a short grace, so a crashed caller cannot pin a lease forever;
+   * callers still release it eagerly in a finally block.
+   */
+  protectSubmit(runId: string, taskId: string): void {
+    const nowMs = Date.parse(this.clock())
+    const lease = this.runs.get(runId)?.tasks[taskId]?.activeLease
+    const baseMs = Math.max(nowMs, lease ? Date.parse(lease.expiresAt) : nowMs)
+    const perRun = this.submitProtections.get(runId) ?? new Map<string, string>()
+    perRun.set(taskId, new Date(baseMs + SUBMIT_PROTECTION_GRACE_MS).toISOString())
+    this.submitProtections.set(runId, perRun)
+  }
+
+  /** Close a submit protection window opened by {@link protectSubmit}. */
+  releaseSubmit(runId: string, taskId: string): void {
+    const perRun = this.submitProtections.get(runId)
+    if (!perRun) return
+    perRun.delete(taskId)
+    if (perRun.size === 0) this.submitProtections.delete(runId)
+  }
+
+  /** Epoch ms until which the task's submit window shields it, if open. */
+  private submitProtectedUntil(runId: string, taskId: string, nowMs: number): number | undefined {
+    const untilIso = this.submitProtections.get(runId)?.get(taskId)
+    if (untilIso === undefined) return undefined
+    const untilMs = Date.parse(untilIso)
+    if (nowMs > untilMs) {
+      this.releaseSubmit(runId, taskId)
+      return undefined
+    }
+    return untilMs
   }
 
   /** Enumerate in-memory run ids for watchdog sweeps and diagnostics. */

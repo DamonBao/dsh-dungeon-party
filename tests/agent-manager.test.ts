@@ -6,7 +6,7 @@ import { describe, expect, it, vi, type Mock } from 'vitest'
 import { PartyAgentManager } from '../src/adapters/party-agent-manager.js'
 import { DungeonService, type DungeonEvent, type WorkOrder } from '../src/service/dungeon-service.js'
 
-function setup(workspaceRoot = '/workspace') {
+function setup(workspaceRoot = '/workspace', clock: () => string = () => '2025-01-01T00:00:00.000Z') {
   const events: DungeonEvent[] = []
   const service = new DungeonService({
     eventStore: {
@@ -14,7 +14,7 @@ function setup(workspaceRoot = '/workspace') {
       load: (runId) => events.filter((event) => event.runId === runId).map((event) => structuredClone(event)),
     },
     idGenerator: (() => { let id = 0; return () => `id-${++id}` })(),
-    clock: () => '2025-01-01T00:00:00.000Z',
+    clock,
   })
   service.startRun({
     runId: 'run', objective: 'Build', workspaceRoot, workspaceFingerprint: 'v1', tankSessionId: 'tank',
@@ -100,10 +100,21 @@ describe('PartyAgentManager', () => {
       version: 2,
       mode: 'continuable',
       provider: 'dungeon-party',
-      label: expect.stringContaining('dps-1'),
+      label: 'Pyra · dps-1',
       agentProvider: 'deepseek',
       agentModel: 'deepseek-chat',
     }))
+  })
+
+  it('labels every slot descriptor with the persona name instead of the run id', async () => {
+    const { manager, descriptorAppend } = setup()
+
+    await manager.ensureMember({ sessionId: 'tank' }, 'run', 'healer')
+    await manager.ensureMember({ sessionId: 'tank' }, 'run', 'dps-2')
+    await manager.ensureMember({ sessionId: 'tank' }, 'run', 'dps-3')
+
+    const labels = descriptorAppend.mock.calls.map((call) => (call[1] as { label: string }).label)
+    expect(labels).toEqual(['Lumina · healer', 'Nyx · dps-2', 'Aster · dps-3'])
   })
 
   it('proactively wakes the healer when validation starts', async () => {
@@ -151,6 +162,66 @@ describe('PartyAgentManager', () => {
     expect(service.getRun('run').tasks['task-1']).toMatchObject({ ownerSlot: 'dps-1' })
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ content: [expect.objectContaining({ text: expect.stringContaining('task-1') })] }),
+      'next-turn',
+      true,
+    )
+  })
+
+  it('queues serial write tasks instead of dispatching them into claim contention', async () => {
+    const { service, manager } = setup()
+    const tank = { sessionId: 'tank' }
+    service.changePhase(tank, 'run', 'PLANNING')
+    for (const [id, scope] of [['task-1', 'src/a/**'], ['task-2', 'src/b/**']] as const) {
+      service.createTask(tank, 'run', {
+        id, runId: 'run', version: 1, title: `Write ${id}`, objective: `Implement ${id}`,
+        inputs: [], constraints: [], acceptanceCriteria: [{ id: `${id}:done`, description: 'Done', required: true }],
+        readScopes: ['src/**'], writeScopes: [scope], blockedBy: [], expectedArtifacts: [],
+        priority: 'normal', required: true,
+      })
+    }
+    await manager.prepareForPhase(tank, 'run', 'EXECUTING')
+    service.changePhase(tank, 'run', 'EXECUTING')
+
+    await manager.dispatchAvailableTasks(tank, 'run')
+
+    const run = service.getRun('run')
+    expect(run.tasks['task-1']).toMatchObject({ ownerSlot: 'dps-1', status: 'ready' })
+    // The second write task stays in the pool while serial mode can only
+    // carry one claimable write task at a time.
+    expect(run.tasks['task-2']!.ownerSlot).toBeUndefined()
+    expect(run.tasks['task-2']!.status).toBe('pending')
+  })
+
+  it('dispatches queued serial write tasks after the active lease is submitted', async () => {
+    const { service, manager, send } = setup()
+    const tank = { sessionId: 'tank' }
+    service.changePhase(tank, 'run', 'PLANNING')
+    for (const [id, scope] of [['task-1', 'src/a/**'], ['task-2', 'src/b/**']] as const) {
+      service.createTask(tank, 'run', {
+        id, runId: 'run', version: 1, title: `Write ${id}`, objective: `Implement ${id}`,
+        inputs: [], constraints: [], acceptanceCriteria: [{ id: `${id}:done`, description: 'Done', required: true }],
+        readScopes: ['src/**'], writeScopes: [scope], blockedBy: [], expectedArtifacts: [],
+        priority: 'normal', required: true,
+      })
+    }
+    await manager.prepareForPhase(tank, 'run', 'EXECUTING')
+    service.changePhase(tank, 'run', 'EXECUTING')
+    await manager.dispatchAvailableTasks(tank, 'run')
+
+    const dps1 = { sessionId: 'run-dps-1-g1' }
+    const lease = service.claimTask(dps1, 'run', 'task-1')
+    service.submitExecution(dps1, 'run', {
+      taskId: 'task-1', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
+      slot: 'dps-1', generation: 1, status: 'completed', summary: 'done', changedFiles: [],
+      evidence: ['done'], commandsRun: [], risks: [], remainingWork: [],
+    })
+
+    await manager.dispatchAvailableTasks(tank, 'run')
+
+    const run = service.getRun('run')
+    expect(run.tasks['task-2']).toMatchObject({ ownerSlot: 'dps-1', status: 'ready' })
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ content: [expect.objectContaining({ text: expect.stringContaining('task-2') })] }),
       'next-turn',
       true,
     )
@@ -481,11 +552,11 @@ describe('PartyAgentManager', () => {
     const { service, manager } = setup()
     const tank = { sessionId: 'tank' }
     service.changePhase(tank, 'run', 'PLANNING')
-    for (const [index, scope] of [['1', 'src/a/**'], ['2', 'src/b/**'], ['3', 'src/c/**'], ['4', 'src/d/**']] as const) {
+    for (const [index, scope] of [['1', 'src/a/**'], ['2', ''], ['3', ''], ['4', '']] as const) {
       service.createTask(tank, 'run', {
         id: `task-${index}`, runId: 'run', title: `Task ${index}`, objective: `Do ${index}`, inputs: [], constraints: [],
         acceptanceCriteria: [{ id: `done-${index}`, description: 'Done', required: index !== '4' }],
-        readScopes: ['src/**'], writeScopes: [scope], blockedBy: [], expectedArtifacts: [],
+        readScopes: ['src/**'], writeScopes: scope ? [scope] : [], blockedBy: [], expectedArtifacts: [],
         priority: 'normal', required: index !== '4', version: 1,
       })
     }
@@ -715,6 +786,101 @@ describe('PartyAgentManager', () => {
       await manager.refreshLeaseAudit('run', 'task')
       await expect(manager.auditWorkspaceBeforeSubmit(dps, 'run', report(3, ['src/one.ts', 'src/two.ts', 'README.md'])))
         .rejects.toThrowError(expect.objectContaining({ code: 'ACTUAL_WRITE_SCOPE_VIOLATION' }))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('excuses unreported toolchain byproducts and reports the exact delta on mismatch', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dungeon-audit-'))
+    mkdirSync(join(root, 'src'))
+    writeFileSync(join(root, 'src', 'index.ts'), 'export {}\n')
+    try {
+      const { service, manager } = setup(root)
+      const tank = { sessionId: 'tank' }
+      await manager.ensureMember(tank, 'run', 'healer')
+      await manager.ensureMember(tank, 'run', 'dps-1')
+      service.changePhase(tank, 'run', 'PLANNING')
+      service.createTask(tank, 'run', {
+        id: 'task', runId: 'run', title: 'Task', objective: 'Edit src', inputs: [], constraints: [],
+        acceptanceCriteria: [{ id: 'done', description: 'Done', required: true }],
+        readScopes: ['src/**'], writeScopes: ['src/**'], blockedBy: [], expectedArtifacts: [],
+        priority: 'normal', required: true, version: 1,
+      })
+      service.changePhase(tank, 'run', 'EXECUTING')
+      service.assignTask(tank, 'run', 'task', 'dps-1')
+      const dps = { sessionId: 'run-dps-1-g1' }
+      const lease = service.claimTask(dps, 'run', 'task')
+      await manager.beginLeaseAudit(dps, 'run', 'task', lease.leaseId)
+      const report = (changedFiles: string[]) => ({
+        taskId: 'task', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
+        slot: 'dps-1' as const, generation: 1, status: 'completed' as const, summary: 'done',
+        changedFiles, evidence: ['done'], commandsRun: [], risks: [], remainingWork: [],
+      })
+
+      // In-scope work plus an unreported lockfile touched by npm install: the
+      // byproduct is excused, the submit must not fail on it.
+      writeFileSync(join(root, 'src', 'one.ts'), 'export const one = 1\n')
+      writeFileSync(join(root, 'package-lock.json'), '{"lockfileVersion":3}\n')
+      await expect(manager.auditWorkspaceBeforeSubmit(dps, 'run', report(['src/one.ts'])))
+        .resolves.toBeUndefined()
+
+      // An unreported real source change still fails — and the error names it
+      // so the executor can correct the report instead of guessing.
+      writeFileSync(join(root, 'src', 'two.ts'), 'export const two = 2\n')
+      await expect(manager.auditWorkspaceBeforeSubmit(dps, 'run', report(['src/one.ts'])))
+        .rejects.toThrowError(expect.objectContaining({
+          code: 'CHANGED_FILES_MISMATCH',
+          message: expect.stringContaining('src/two.ts'),
+        }))
+
+      // Over-reporting is named as well.
+      await expect(manager.auditWorkspaceBeforeSubmit(dps, 'run', report(['src/one.ts', 'src/two.ts', 'src/ghost.ts'])))
+        .rejects.toThrowError(expect.objectContaining({
+          code: 'CHANGED_FILES_MISMATCH',
+          message: expect.stringContaining('src/ghost.ts'),
+        }))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('lets an in-flight submit land even when the lease expires during the turn', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dungeon-audit-'))
+    mkdirSync(join(root, 'src'))
+    writeFileSync(join(root, 'src', 'index.ts'), 'export {}\n')
+    try {
+      let now = Date.parse('2025-01-01T00:00:00.000Z')
+      const { service, manager } = setup(root, () => new Date(now).toISOString())
+      const tank = { sessionId: 'tank' }
+      await manager.ensureMember(tank, 'run', 'healer')
+      await manager.ensureMember(tank, 'run', 'dps-1')
+      service.changePhase(tank, 'run', 'PLANNING')
+      service.createTask(tank, 'run', {
+        id: 'task', runId: 'run', title: 'Task', objective: 'Edit src', inputs: [], constraints: [],
+        acceptanceCriteria: [{ id: 'done', description: 'Done', required: true }],
+        readScopes: ['src/**'], writeScopes: ['src/**'], blockedBy: [], expectedArtifacts: [],
+        priority: 'normal', required: true, version: 1,
+      })
+      service.changePhase(tank, 'run', 'EXECUTING')
+      service.assignTask(tank, 'run', 'task', 'dps-1')
+      const dps = { sessionId: 'run-dps-1-g1' }
+      const lease = service.claimTask(dps, 'run', 'task')
+      await manager.beginLeaseAudit(dps, 'run', 'task', lease.leaseId)
+      writeFileSync(join(root, 'src', 'one.ts'), 'export const one = 1\n')
+
+      // The turn ran long: the lease expired while the DPS was finishing.
+      now += 700_000
+      const task = await manager.submitExecutionWithAudit(dps, 'run', {
+        taskId: 'task', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
+        slot: 'dps-1', generation: 1, status: 'completed', summary: 'done',
+        changedFiles: ['src/one.ts'], evidence: ['done'], commandsRun: [], risks: [], remainingWork: [],
+      })
+
+      expect(task.status).toBe('completed')
+      // Once the submit window closes, the sweep is authoritative again.
+      service.sweepExpiredState('run')
+      expect(service.getRun('run').tasks.task!.activeLease).toBeUndefined()
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

@@ -145,10 +145,29 @@ describe('dungeon configuration', () => {
     expect(config.fingerprintIgnoreScopes.length).toBeGreaterThan(0)
   })
 
-  it('uses provided fingerprintIgnoreScopes when non-empty', () => {
+  it('merges provided fingerprintIgnoreScopes with the defaults instead of replacing them', () => {
     const customScopes = ['custom/**', 'tmp/**']
     const config = resolveDungeonConfig({ fingerprintIgnoreScopes: customScopes })
-    expect(config.fingerprintIgnoreScopes).toEqual(customScopes)
+    expect(config.fingerprintIgnoreScopes).toEqual(expect.arrayContaining([
+      'custom/**', 'tmp/**', 'node_modules/**', '.git/**', '.npm-cache/**',
+    ]))
+  })
+
+  it('excuses common submit byproducts by default and merges custom ones', () => {
+    expect(defaultDungeonConfig.submitByproductScopes).toEqual(expect.arrayContaining([
+      'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock',
+    ]))
+    const config = resolveDungeonConfig({ submitByproductScopes: ['custom-cache/**'] })
+    expect(config.submitByproductScopes).toEqual(expect.arrayContaining([
+      'custom-cache/**', 'package-lock.json',
+    ]))
+  })
+
+  it('ignores common toolchain byproducts by default', () => {
+    expect(defaultDungeonConfig.fingerprintIgnoreScopes).toEqual(expect.arrayContaining([
+      'tsconfig.tsbuildinfo', '.eslintcache', 'test-results/**', 'playwright-report/**',
+      '.pytest_cache/**', '__pycache__/**', 'build/**', '.next/**', '*.log', '.DS_Store',
+    ]))
   })
 
   it('uses default fingerprintIgnoreScopes when input omits the field', () => {

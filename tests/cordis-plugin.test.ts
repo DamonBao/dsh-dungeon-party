@@ -63,6 +63,9 @@ describe('Cordis plugin', () => {
     expect(root.sessionProjections.snapshot(tankSession).values['dungeon-party']).toMatchObject({
       id: 'run-projected', phase: 'FORMING',
     })
+    // Session events feed the watchdog's activity signal, so long turns are
+    // never mistaken for stalls while the member is still emitting events.
+    expect(root.dungeonParty.agentManager.lastActivityAt('tank')).toBeTypeOf('number')
 
     await fiber.dispose()
     expect(root.tools.schemas().map((schema) => schema.name)).not.toContain('party_start')

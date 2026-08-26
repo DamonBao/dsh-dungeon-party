@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  createReadableRunId,
   DungeonError,
   DungeonService,
   type DungeonConfig,
@@ -97,6 +98,75 @@ function validatingRun(service: DungeonService): ValidationManifest {
   return service.createValidationManifest(tank, run.id, 'fingerprint-v1')
 }
 
+function setupWithMutableClock() {
+  let now = Date.parse('2025-01-01T00:00:00.000Z')
+  let id = 0
+  const persisted: DungeonEvent[] = []
+  const service = new DungeonService({
+    eventStore: {
+      append(event) { persisted.push(structuredClone(event)) },
+      load(runId) { return persisted.filter((event) => event.runId === runId).map((event) => structuredClone(event)) },
+    },
+    idGenerator: () => `id-${++id}`,
+    clock: () => new Date(now).toISOString(),
+  })
+  const run = service.startRun({
+    runId: 'run-1', objective: 'Build', workspaceRoot: process.cwd(),
+    workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
+  })
+  service.bindMember(tank, run.id, 'healer', healer.sessionId)
+  service.bindMember(tank, run.id, 'dps-1', dps1.sessionId)
+  service.changePhase(tank, run.id, 'PLANNING')
+  service.createTask(tank, run.id, task())
+  service.changePhase(tank, run.id, 'EXECUTING')
+  service.assignTask(tank, run.id, 'task-1', 'dps-1')
+  const lease = service.claimTask(dps1, run.id, 'task-1')
+  return {
+    service, run, lease,
+    advance: (ms: number) => { now += ms },
+  }
+}
+
+describe('submit window protection', () => {
+  const completedReport = (lease: { leaseId: string; version: number }) => ({
+    taskId: 'task-1', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
+    slot: 'dps-1' as const, generation: 1, status: 'completed' as const, summary: 'Done',
+    changedFiles: [] as string[], evidence: ['done'], commandsRun: [], risks: [], remainingWork: [],
+  })
+
+  it('keeps a lease alive against sweep and submit while a submit window is open', () => {
+    const { service, run, lease, advance } = setupWithMutableClock()
+
+    service.protectSubmit(run.id, 'task-1')
+    advance(620_000) // past the 10 minute lease duration, inside the window
+    service.sweepExpiredState(run.id)
+
+    expect(service.getRun(run.id).tasks['task-1']!.activeLease).toBeDefined()
+    service.submitExecution(dps1, run.id, completedReport(lease))
+    expect(service.getRun(run.id).tasks['task-1']!.status).toBe('completed')
+  })
+
+  it('revokes an expired lease again once the submit window is released', () => {
+    const { service, run, lease, advance } = setupWithMutableClock()
+
+    service.protectSubmit(run.id, 'task-1')
+    advance(620_000)
+    service.sweepExpiredState(run.id)
+    expect(service.getRun(run.id).tasks['task-1']!.activeLease).toBeDefined()
+
+    service.releaseSubmit(run.id, 'task-1')
+    service.sweepExpiredState(run.id)
+
+    const task = service.getRun(run.id).tasks['task-1']!
+    expect(task.activeLease).toBeUndefined()
+    // The task returned to the pool (owner cleared), so the stale report is
+    // rejected before any lease comparison.
+    expect(() => service.submitExecution(dps1, run.id, completedReport(lease))).toThrowError(
+      expect.objectContaining({ code: 'FORBIDDEN' }),
+    )
+  })
+})
+
 function passSubmission(manifest: ValidationManifest, validationId: string): ValidationSubmission {
   return {
     validationId,
@@ -153,6 +223,28 @@ describe('DungeonService', () => {
 
     const recovered = service.recoverRun(run.id)
     expect(recovered).toEqual(run)
+  })
+
+  it('formats readable run ids deterministically (UTC) from an instant and suffix', () => {
+    expect(createReadableRunId(new Date(Date.UTC(2025, 0, 2, 3, 4, 5, 678)), 'ab12'))
+      .toBe('run-20250102-030405-ab12')
+  })
+
+  it('generates readable unique host run ids when the caller omits runId', () => {
+    const { service } = setup()
+
+    const run = service.startRun({
+      objective: 'Build', workspaceRoot: process.cwd(),
+      workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
+    })
+    const second = service.startRun({
+      objective: 'Build again', workspaceRoot: process.cwd(),
+      workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
+    })
+
+    expect(run.id).toMatch(/^run-\d{8}-\d{6}-[0-9a-z]{4}$/)
+    expect(second.id).toMatch(/^run-\d{8}-\d{6}-[0-9a-z]{4}$/)
+    expect(second.id).not.toBe(run.id)
   })
 
   it('waits from an event cursor and returns only newer durable events', async () => {
@@ -273,6 +365,34 @@ describe('DungeonService', () => {
 
     expect(() => service.claimTask({ sessionId: 'session-dps-2' }, run.id, 'task-2')).toThrowError(
       expect.objectContaining({ code: 'WRITE_DISPATCH_SERIALIZED' }),
+    )
+  })
+
+  it('tells serialized claimers to wait instead of retrying work_claim', () => {
+    const { service } = setup()
+    const run = service.startRun({
+      runId: 'run-1', objective: 'Build', workspaceRoot: process.cwd(),
+      workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
+    })
+    service.bindMember(tank, run.id, 'healer', healer.sessionId)
+    service.bindMember(tank, run.id, 'dps-1', dps1.sessionId)
+    service.bindMember(tank, run.id, 'dps-2', 'session-dps-2')
+    service.changePhase(tank, run.id, 'PLANNING')
+    service.createTask(tank, run.id, task())
+    service.createTask(tank, run.id, task({
+      id: 'task-2', writeScopes: ['tests/**'],
+      acceptanceCriteria: [{ id: 'task-2:works', description: 'Second works', required: true }],
+    }))
+    service.changePhase(tank, run.id, 'EXECUTING')
+    service.assignTask(tank, run.id, 'task-1', 'dps-1')
+    service.assignTask(tank, run.id, 'task-2', 'dps-2')
+    service.claimTask(dps1, run.id, 'task-1')
+
+    expect(() => service.claimTask({ sessionId: 'session-dps-2' }, run.id, 'task-2')).toThrowError(
+      expect.objectContaining({
+        code: 'WRITE_DISPATCH_SERIALIZED',
+        message: expect.stringContaining('party_wait'),
+      }),
     )
   })
 

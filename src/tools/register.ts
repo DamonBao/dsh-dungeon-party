@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { realpathSync, statSync } from 'node:fs'
 import { isAbsolute, relative, resolve } from 'node:path'
@@ -30,6 +29,7 @@ import {
 } from './output-schemas.js'
 import { workspaceComputationQueue } from '../adapters/workspace-computation-queue.js'
 import {
+  createReadableRunId,
   DungeonError,
   type DpsCheckpoint,
   type DpsSlot,
@@ -106,6 +106,7 @@ function summarizeRun(run: DungeonRun) {
     taskVersion: task.workOrder.version,
     leaseVersion: task.activeLease?.version,
     nextCheckpointDueAt: task.nextCheckpointDueAt,
+    currentTurnId: task.currentTurnId,
     summary: boundedText(task.executionReports.at(-1)?.summary, 300),
     modifiedAssertions: task.executionReports.at(-1)?.modifiedAssertions?.slice(0, 20).map((item) => ({
       file: boundedText(item.file, 300), test: boundedText(item.test, 300), reason: boundedText(item.reason, 500),
@@ -614,6 +615,7 @@ export function registerDungeonTools(
             progressState: task.progressState,
             missedCheckpoints: task.missedCheckpoints,
             nextCheckpointDueAt: task.nextCheckpointDueAt,
+            currentTurnId: task.currentTurnId,
           })),
           battleResChargesRemaining: run.battleResChargesRemaining,
           commanderBattleResChargesRemaining: run.commanderBattleResChargesRemaining,
@@ -822,7 +824,7 @@ export function registerDungeonTools(
           service.changePhase(caller, args.runId, 'CANCELLED')
         }
         await agentManager?.disposeRun(args.runId)
-        const newRunId = args.newRunId?.trim() || `run-${randomUUID()}`
+        const newRunId = args.newRunId?.trim() || createReadableRunId()
         const workspaceFingerprint = await workspaceComputationQueue.fingerprint(previous.workspaceRoot, service.getFingerprintIgnoreScopes())
         return canonical(summarizeRun(service.startRun({
           runId: newRunId,
