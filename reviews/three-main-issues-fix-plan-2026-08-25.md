@@ -215,3 +215,15 @@
 - 未配置 `runId` 的 run 从裸 UUID 变为 `run-<UTC日期>-<UTC时间>-<4hex>`。
 
 **未实施（后续排期）**：1.4（session/title）、1.5（人设单一数据源）、1.6 已随 1.3 收紧、2.4、2.5、2.6、2.7、3.5、3.6、3.7。
+
+## 8. 复审发现修复（2026-08-25 第二轮，TDD）
+
+针对落地提交的外部复审发现 5 项（3×P1 + 2×P2），全部修复并补测试；测试总数 196 → 201。
+
+| 发现 | 等级 | 修复 | 覆盖测试 |
+|---|---|---|---|
+| 副产物白名单绕过写入范围审计（`!isByproduct` 跳过越界检查） | P1 | 副产物豁免**仅**放宽串行 changedFiles 比较；越界检查恢复严格——任务仅持有 `src/**` 时修改 `package-lock.json` 仍报 `ACTUAL_WRITE_SCOPE_VIOLATION` | `agent-manager.test.ts`：in-scope 豁免用例改写 + 越界绕过回归用例 |
+| serial 排队仅覆盖自动调度，tank 手动 `party_assign` 仍可制造抢锁 | P1 | 新增统一门 `assertSerialWriteAssignable`（含活跃租约与“已分配待领”两种占位），在 `preflightTaskAssignment` 与 `reassignTask` 层强制；`claimTask` 保留同源防御；管理器派发预过滤委托服务谓词 `serialWriteBlocked` | `dungeon-service.test.ts`：手动分配被拒 ×2、down-owner 排队/改派放行用例；`maxConcurrentDps` 用例改用只读任务 |
+| 已过期任意时长的 lease 可被 `protectSubmit` 重新保护（`Math.max(now, expiresAt)`） | P1 | 窗口严格锚定 `lease.expiresAt + grace`（60s）；超过宽限后 `protectSubmit` 不再产生新窗口，陈旧租约可被 sweep、不可提交 | `dungeon-service.test.ts`：超宽限再保护被拒用例；在途提交用例改到 640s（宽限内） |
+| 默认 run ID 仅 16 bit 随机熵（4 hex） | P2 | 后缀扩为 8 hex（32 bit）；`startRun` 自动 id 碰撞时有界重试（≤8 次，检查内存与事件存储）；新增可注入 `runIdGenerator` 选项 | `dungeon-service.test.ts`：格式正则收紧 + 碰撞重试用例 |
+| descriptor label 多 run 不可区分 | P2 | label 追加短 run 标识：可读 runId 取末段随机后缀（如 `deadbeef`），任意 id 取有界尾部；形如 `Pyra · dps-1 · deadbeef` | `agent-manager.test.ts`：既有 label 断言更新 + 跨 run 消歧用例 |

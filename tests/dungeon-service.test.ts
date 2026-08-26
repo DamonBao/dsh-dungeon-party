@@ -165,6 +165,21 @@ describe('submit window protection', () => {
       expect.objectContaining({ code: 'FORBIDDEN' }),
     )
   })
+
+  it('refuses to re-protect a lease that expired beyond the grace window', () => {
+    const { service, run, lease, advance } = setupWithMutableClock()
+
+    // Expired 200s ago: far beyond the 60s grace. Protecting now must not
+    // mint a fresh window — the stale lease stays sweepable and un-submittable.
+    advance(800_000)
+    service.protectSubmit(run.id, 'task-1')
+    service.sweepExpiredState(run.id)
+
+    expect(service.getRun(run.id).tasks['task-1']!.activeLease).toBeUndefined()
+    expect(() => service.submitExecution(dps1, run.id, completedReport(lease))).toThrowError(
+      expect.objectContaining({ code: 'FORBIDDEN' }),
+    )
+  })
 })
 
 function passSubmission(manifest: ValidationManifest, validationId: string): ValidationSubmission {
@@ -226,8 +241,8 @@ describe('DungeonService', () => {
   })
 
   it('formats readable run ids deterministically (UTC) from an instant and suffix', () => {
-    expect(createReadableRunId(new Date(Date.UTC(2025, 0, 2, 3, 4, 5, 678)), 'ab12'))
-      .toBe('run-20250102-030405-ab12')
+    expect(createReadableRunId(new Date(Date.UTC(2025, 0, 2, 3, 4, 5, 678)), 'ab12cd34'))
+      .toBe('run-20250102-030405-ab12cd34')
   })
 
   it('generates readable unique host run ids when the caller omits runId', () => {
@@ -242,9 +257,35 @@ describe('DungeonService', () => {
       workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
     })
 
-    expect(run.id).toMatch(/^run-\d{8}-\d{6}-[0-9a-z]{4}$/)
-    expect(second.id).toMatch(/^run-\d{8}-\d{6}-[0-9a-z]{4}$/)
+    expect(run.id).toMatch(/^run-\d{8}-\d{6}-[0-9a-z]{8}$/)
+    expect(second.id).toMatch(/^run-\d{8}-\d{6}-[0-9a-z]{8}$/)
     expect(second.id).not.toBe(run.id)
+  })
+
+  it('retries auto-generated run ids that collide with existing runs', () => {
+    let index = 0
+    const generated = ['dup', 'dup', 'fresh']
+    const persisted: DungeonEvent[] = []
+    const service = new DungeonService({
+      eventStore: {
+        append(event) { persisted.push(structuredClone(event)) },
+        load(runId) { return persisted.filter((event) => event.runId === runId).map((event) => structuredClone(event)) },
+      },
+      idGenerator: (() => { let id = 0; return () => `id-${++id}` })(),
+      clock: () => '2025-01-01T00:00:00.000Z',
+      runIdGenerator: () => generated[index++] ?? 'extra',
+    })
+    service.startRun({
+      runId: 'dup', objective: 'Existing', workspaceRoot: process.cwd(),
+      workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
+    })
+
+    const run = service.startRun({
+      objective: 'Build', workspaceRoot: process.cwd(),
+      workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
+    })
+
+    expect(run.id).toBe('fresh')
   })
 
   it('waits from an event cursor and returns only newer durable events', async () => {
@@ -343,7 +384,7 @@ describe('DungeonService', () => {
     }))).not.toThrow()
   })
 
-  it('serializes write leases when strict scope enforcement has no telemetry', () => {
+  it('serializes write-task assignment when strict scope enforcement has no telemetry', () => {
     const { service } = setup({ strictPerAgentWriteScopes: true })
     const run = service.startRun({
       runId: 'run-1', objective: 'Build', workspaceRoot: process.cwd(),
@@ -360,15 +401,16 @@ describe('DungeonService', () => {
     }))
     service.changePhase(tank, run.id, 'EXECUTING')
     service.assignTask(tank, run.id, 'task-1', 'dps-1')
-    service.assignTask(tank, run.id, 'task-2', 'dps-2')
     service.claimTask(dps1, run.id, 'task-1')
 
-    expect(() => service.claimTask({ sessionId: 'session-dps-2' }, run.id, 'task-2')).toThrowError(
+    // The tank's manual assignment path hits the same serial gate as the
+    // scheduler: a second write task cannot enter the claimable state.
+    expect(() => service.assignTask(tank, run.id, 'task-2', 'dps-2')).toThrowError(
       expect.objectContaining({ code: 'WRITE_DISPATCH_SERIALIZED' }),
     )
   })
 
-  it('tells serialized claimers to wait instead of retrying work_claim', () => {
+  it('tells serialized assignment to wait instead of creating claim contention', () => {
     const { service } = setup()
     const run = service.startRun({
       runId: 'run-1', objective: 'Build', workspaceRoot: process.cwd(),
@@ -385,15 +427,56 @@ describe('DungeonService', () => {
     }))
     service.changePhase(tank, run.id, 'EXECUTING')
     service.assignTask(tank, run.id, 'task-1', 'dps-1')
-    service.assignTask(tank, run.id, 'task-2', 'dps-2')
     service.claimTask(dps1, run.id, 'task-1')
 
-    expect(() => service.claimTask({ sessionId: 'session-dps-2' }, run.id, 'task-2')).toThrowError(
+    expect(() => service.assignTask(tank, run.id, 'task-2', 'dps-2')).toThrowError(
       expect.objectContaining({
         code: 'WRITE_DISPATCH_SERIALIZED',
         message: expect.stringContaining('party_wait'),
       }),
     )
+  })
+
+  it('keeps a downed write task ahead of the serial queue until it is reassigned', () => {
+    const { service } = setup()
+    const run = service.startRun({
+      runId: 'run-1', objective: 'Build', workspaceRoot: process.cwd(),
+      workspaceFingerprint: 'fingerprint-v1', tankSessionId: tank.sessionId,
+    })
+    service.bindMember(tank, run.id, 'healer', healer.sessionId)
+    service.bindMember(tank, run.id, 'dps-1', dps1.sessionId)
+    service.bindMember(tank, run.id, 'dps-2', 'session-dps-2')
+    service.bindMember(tank, run.id, 'dps-3', 'session-dps-3')
+    service.changePhase(tank, run.id, 'PLANNING')
+    service.createTask(tank, run.id, task())
+    service.createTask(tank, run.id, task({
+      id: 'task-2', writeScopes: ['tests/**'],
+      acceptanceCriteria: [{ id: 'task-2:works', description: 'Second works', required: true }],
+    }))
+    service.changePhase(tank, run.id, 'EXECUTING')
+    service.assignTask(tank, run.id, 'task-2', 'dps-2')
+    service.claimTask({ sessionId: 'session-dps-2' }, run.id, 'task-2')
+    service.markMemberDown(run.id, 'dps-2', 'runtime crashed')
+
+    // task-2 lost its lease to the crash but stays owned and ready, so the
+    // serial queue must not admit another write task behind its back.
+    expect(() => service.assignTask(tank, run.id, 'task-1', 'dps-1')).toThrowError(
+      expect.objectContaining({ code: 'WRITE_DISPATCH_SERIALIZED' }),
+    )
+
+    // Reassignment to a live slot clears the queue head.
+    const reassigned = service.reassignTask(tank, run.id, 'task-2', 'dps-3')
+    expect(reassigned).toMatchObject({ ownerSlot: 'dps-3', status: 'ready' })
+    const lease = service.claimTask({ sessionId: 'session-dps-3' }, run.id, 'task-2')
+    service.submitExecution({ sessionId: 'session-dps-3' }, run.id, {
+      taskId: 'task-2', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
+      slot: 'dps-3', generation: 1, status: 'completed', summary: 'Done',
+      changedFiles: ['tests/dungeon-service.test.ts'], evidence: ['done'], commandsRun: [], risks: [], remainingWork: [],
+      modifiedAssertions: [{ file: 'tests/dungeon-service.test.ts', test: 'task-2 works', reason: 'added coverage for the new behavior' }],
+    })
+
+    // With the queue drained, task-1 is assignable again.
+    expect(service.assignTask(tank, run.id, 'task-1', 'dps-1')).toMatchObject({ ownerSlot: 'dps-1', status: 'ready' })
   })
 
   it('enforces maxConcurrentDps when granting leases', () => {
@@ -406,9 +489,9 @@ describe('DungeonService', () => {
     service.bindMember(tank, run.id, 'dps-1', dps1.sessionId)
     service.bindMember(tank, run.id, 'dps-2', 'session-dps-2')
     service.changePhase(tank, run.id, 'PLANNING')
-    service.createTask(tank, run.id, task())
+    service.createTask(tank, run.id, { ...task(), writeScopes: [] })
     service.createTask(tank, run.id, task({
-      id: 'task-2', writeScopes: ['tests/**'],
+      id: 'task-2', writeScopes: [],
       acceptanceCriteria: [{ id: 'task-2:works', description: 'Second works', required: true }],
     }))
     service.changePhase(tank, run.id, 'EXECUTING')

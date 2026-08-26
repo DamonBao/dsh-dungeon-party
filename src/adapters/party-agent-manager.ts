@@ -313,21 +313,12 @@ export class PartyAgentManager {
   }
 
   /**
-   * Serial scope mode can carry exactly one claimable write task at a time.
-   * A write task is blocked while another write task holds an active lease
-   * or is already assigned and awaiting its claim; read-only tasks are never
-   * blocked. Reads live run state because earlier loop iterations may have
-   * assigned tasks since the caller's snapshot.
+   * Dispatch fast-path prefilter; the authoritative gate lives in the service
+   * (`preflightTaskAssignment` / `reassignTask` / `claimTask`) and covers the
+   * tank's manual assignment path too.
    */
   private serialWriteBlocked(runId: string, task: TaskRecord): boolean {
-    const run = this.service.getRun(runId)
-    if (run.scopeEnforcementMode !== 'serial') return false
-    if (task.workOrder.writeScopes.length === 0) return false
-    return Object.values(run.tasks).some((other) =>
-      other.workOrder.id !== task.workOrder.id &&
-      other.workOrder.writeScopes.length > 0 &&
-      (other.activeLease !== undefined || (other.status === 'ready' && other.ownerSlot !== undefined)),
-    )
+    return this.service.serialWriteBlocked(runId, task.workOrder.id)
   }
 
   private async withDispatchLock<T>(runId: string, operation: () => Promise<T>): Promise<T> {
@@ -623,7 +614,7 @@ export class PartyAgentManager {
         }
         this.handles.set(key, handle)
       }
-      this.ensureSubagentDescriptor(handle.agent, request.targetSlot)
+      this.ensureSubagentDescriptor(handle.agent, runId, request.targetSlot)
       try {
         if (!restored) {
           handle.agent.cancel(
@@ -682,7 +673,7 @@ export class PartyAgentManager {
         this.ensureGuardInstalled(agentCtx, runId, request.targetSlot)
       },
     })
-    this.ensureSubagentDescriptor(handle.agent, request.targetSlot)
+    this.ensureSubagentDescriptor(handle.agent, runId, request.targetSlot)
     let completed: ResurrectionRequest
     try {
       completed = this.service.completeBattleRes(actor, runId, resurrectionId, {
@@ -789,14 +780,15 @@ export class PartyAgentManager {
     // re-baselines moved their deltas into `accumulated`, so pre-checkpoint
     // (and out-of-scope) changes can no longer be silently absorbed.
     const changedFiles = [...new Set([...audit.accumulated, ...diffWorkspaceSnapshots(audit.snapshot, current)])].sort()
-    // Toolchain byproducts (lockfiles and the like) are excused everywhere in
-    // the audit: they are not scope violations and they must not break the
-    // serial changedFiles comparison when the executor did not report them.
+    // Byproduct exemption relaxes ONLY the serial changedFiles comparison for
+    // files inside the task's own scopes. It must never bypass the write-scope
+    // boundary: a byproduct-shaped change outside every active lease scope is
+    // still a violation.
     const byproductScopes = this.service.getSubmitByproductScopes()
     const isByproduct = (path: string) => byproductScopes.some((scope) => path === scope || matchesGlob(path, scope))
     const activeScopes = Object.values(run.tasks).flatMap((task) => task.activeLease ? task.workOrder.writeScopes : [])
     const outsideActiveScopes = changedFiles.filter((path) =>
-      !isByproduct(path) && !activeScopes.some((scope) => path === scope || matchesGlob(path, scope)),
+      !activeScopes.some((scope) => path === scope || matchesGlob(path, scope)),
     )
     if (outsideActiveScopes.length > 0) {
       throw new DungeonError(
@@ -1062,12 +1054,15 @@ export class PartyAgentManager {
     this.dispatchedRecoveryIds.add(recoveryId)
   }
 
-  private ensureSubagentDescriptor(agent: Agent, slot: ChildSlot): void {
+  private ensureSubagentDescriptor(agent: Agent, runId: string, slot: ChildSlot): void {
     if (agent.session.events.some((event) => event.type === 'subagent/descriptor')) return
     agent.session.append('subagent/descriptor', snapshotSubagentDescriptor({
       mode: 'continuable',
       provider: 'dungeon-party',
-      label: `${rolePersonaNames[slot]} · ${slot}`,
+      // Persona name + slot stays human-readable; the short run tag keeps
+      // same-persona members of different runs distinguishable without
+      // resurfacing the full run id.
+      label: `${rolePersonaNames[slot]} · ${slot} · ${shortRunTag(runId)}`,
       ...agent.options.provider ? { agentProvider: agent.options.provider } : {},
       ...agent.options.model ? { agentModel: agent.options.model } : {},
       persona: rolePersonas[slot],
@@ -1079,7 +1074,7 @@ export class PartyAgentManager {
     const key = keyFor(runId, slot)
     const live = this.agents.get(sessionId as SessionId)
     if (live) {
-      this.ensureSubagentDescriptor(live, slot)
+      this.ensureSubagentDescriptor(live, runId, slot)
       // An agent created outside the dungeon flow never ran our setup; make
       // sure its context still carries the execution guard.
       const liveCtx = (live as { ctx?: Context }).ctx
@@ -1103,7 +1098,7 @@ export class PartyAgentManager {
         this.ensureGuardInstalled(agentCtx, runId, slot)
       },
     })
-    this.ensureSubagentDescriptor(handle.agent, slot)
+    this.ensureSubagentDescriptor(handle.agent, runId, slot)
     this.handles.set(key, handle)
     return String(handle.agent.id)
   }
@@ -1135,7 +1130,7 @@ export class PartyAgentManager {
         this.ensureGuardInstalled(agentCtx, runId, slot)
       },
     })
-    this.ensureSubagentDescriptor(handle.agent, slot)
+    this.ensureSubagentDescriptor(handle.agent, runId, slot)
     try {
       this.service.bindMember(actor, runId, slot, String(handle.agent.id))
       this.handles.set(keyFor(runId, slot), handle)
@@ -1155,6 +1150,16 @@ function keyFor(runId: string, slot: ChildSlot): string {
 function boundedPathList(paths: string[], limit = 20): string {
   if (paths.length <= limit) return paths.join(', ')
   return `${paths.slice(0, limit).join(', ')}, … (${paths.length - limit} more)`
+}
+
+/**
+ * Short distinguishing tag of a run id for descriptor labels: the trailing
+ * random segment of a readable id (`run-<date>-<time>-<tag>`), or a bounded
+ * tail of arbitrary ids.
+ */
+function shortRunTag(runId: string): string {
+  const tag = runId.includes('-') ? runId.slice(runId.lastIndexOf('-') + 1) : runId
+  return tag.slice(0, 12) || runId.slice(-6)
 }
 
 /**

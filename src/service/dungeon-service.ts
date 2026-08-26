@@ -403,6 +403,8 @@ export interface DungeonWaitResult {
 export interface DungeonServiceOptions {
   eventStore: DungeonEventStore
   idGenerator?: () => string
+  /** Injectable auto run-id factory; defaults to {@link createReadableRunId}. */
+  runIdGenerator?: () => string
   clock?: () => string
   /** Injected artifact-existence probe so the core stays testable off-host. */
   fileExists?: (absolutePath: string) => boolean
@@ -422,10 +424,11 @@ export interface StartRunInput {
 }
 
 /**
- * Human-readable, sortable default run id: `run-<UTC date>-<UTC time>-<4 hex>`.
+ * Human-readable, sortable default run id: `run-<UTC date>-<UTC time>-<8 hex>`.
  * Child session ids and subagent descriptor labels embed the run id, so a
  * readable run id keeps the whole party enumerable in the host UI instead of
- * surfacing raw UUIDs.
+ * surfacing raw UUIDs. The 8-hex suffix carries 32 bits of entropy, which
+ * keeps same-second collision odds negligible for realistic burst starts.
  */
 export function createReadableRunId(at: Date = new Date(), suffix: string = defaultRunIdSuffix()): string {
   const pad = (value: number) => String(value).padStart(2, '0')
@@ -435,7 +438,7 @@ export function createReadableRunId(at: Date = new Date(), suffix: string = defa
 }
 
 function defaultRunIdSuffix(): string {
-  return crypto.randomUUID().slice(0, 4)
+  return crypto.randomUUID().replaceAll('-', '').slice(0, 8)
 }
 
 /**
@@ -674,6 +677,7 @@ export class DungeonService {
   private readonly runs = new Map<string, DungeonRun>()
   private readonly eventStore: DungeonEventStore
   private readonly idGenerator: () => string
+  private readonly runIdGenerator: () => string
   private readonly clock: () => string
   private readonly fileExists: (absolutePath: string) => boolean
   private readonly config: DungeonConfig
@@ -692,6 +696,7 @@ export class DungeonService {
   constructor(options: DungeonServiceOptions) {
     this.eventStore = options.eventStore
     this.idGenerator = options.idGenerator ?? (() => crypto.randomUUID())
+    this.runIdGenerator = options.runIdGenerator ?? (() => createReadableRunId())
     this.clock = options.clock ?? (() => new Date().toISOString())
     this.fileExists = options.fileExists ?? existsSync
     this.config = resolveDungeonConfig({
@@ -705,7 +710,20 @@ export class DungeonService {
   startRun(input: StartRunInput): DungeonRun {
     assert(typeof input.objective === 'string' && input.objective.trim(), 'INVALID_OBJECTIVE', 'Run objective is required')
     assert(input.tankSessionId, 'INVALID_TANK', 'Tank session is required')
-    const runId = input.runId ?? createReadableRunId()
+    let runId = input.runId
+    if (runId === undefined) {
+      // Bounded collision retry: same-second bursts share the timestamp part,
+      // so the random suffix decides; a hit must not surface as a confusing
+      // idempotency conflict on a run the caller never started.
+      runId = this.runIdGenerator()
+      for (
+        let attempts = 0;
+        attempts < 8 && (this.runs.has(runId) || this.eventStore.load(runId).length > 0);
+        attempts += 1
+      ) {
+        runId = this.runIdGenerator()
+      }
+    }
     const storedEvents = this.eventStore.load(runId)
     const existing = this.runs.get(runId) ?? (storedEvents.length > 0 ? this.recoverRun(runId) : undefined)
     if (existing) {
@@ -887,9 +905,45 @@ export class DungeonService {
       (candidate.status === 'ready' || candidate.status === 'running'),
     )
     assert(!busySlotTask, 'SLOT_BUSY', `Slot ${slot} already owns ${busySlotTask?.workOrder.id ?? 'another active task'}`)
+    this.assertSerialWriteAssignable(run, task)
     const unmet = task.workOrder.blockedBy.filter((dependency) => run.tasks[dependency]?.status !== 'completed')
     assert(unmet.length === 0, 'UNMET_DEPENDENCY', `Task is blocked by ${unmet.join(', ')}`)
     return clone(task)
+  }
+
+  /**
+   * Serial scope mode can carry exactly one claimable write task at a time.
+   * True while another write task holds an active lease or is already
+   * assigned awaiting its claim; read-only tasks are never blocked.
+   */
+  serialWriteBlocked(runId: string, taskId: string): boolean {
+    const run = this.requireRun(runId)
+    const task = run.tasks[taskId]
+    if (!task) return false
+    return this.findSerialWriteBlocker(run, task) !== undefined
+  }
+
+  private findSerialWriteBlocker(run: DungeonRun, task: TaskRecord): TaskRecord | undefined {
+    if (run.scopeEnforcementMode !== 'serial') return undefined
+    if (task.workOrder.writeScopes.length === 0) return undefined
+    return Object.values(run.tasks).find((candidate) =>
+      candidate.workOrder.id !== task.workOrder.id &&
+      candidate.workOrder.writeScopes.length > 0 &&
+      (candidate.activeLease !== undefined || (candidate.status === 'ready' && candidate.ownerSlot !== undefined)),
+    )
+  }
+
+  /**
+   * Unified serial gate for every path that puts a write task into the
+   * claimable state (tank assignment, scheduler dispatch, reassignment).
+   */
+  private assertSerialWriteAssignable(run: DungeonRun, task: TaskRecord): void {
+    const blocker = this.findSerialWriteBlocker(run, task)
+    assert(
+      !blocker,
+      'WRITE_DISPATCH_SERIALIZED',
+      `Strict scope mode serializes write leases; ${blocker?.workOrder.id ?? 'another write task'} is ahead in the queue. Wait with party_wait until it completes before assigning or claiming another write task.`,
+    )
   }
 
   assignTask(actor: Actor, runId: string, taskId: string, slot: DpsSlot): TaskRecord {
@@ -933,12 +987,8 @@ export class DungeonService {
       `At most ${this.config.maxConcurrentDps} DPS slots may hold leases concurrently`,
     )
     if (run.scopeEnforcementMode === 'serial' && task.workOrder.writeScopes.length > 0) {
-      const anotherWriter = Object.values(run.tasks).find((candidate) =>
-        candidate.workOrder.id !== taskId &&
-        candidate.workOrder.writeScopes.length > 0 &&
-        candidate.activeLease,
-      )
-      assert(!anotherWriter, 'WRITE_DISPATCH_SERIALIZED', `Strict scope mode serializes write leases; ${anotherWriter?.workOrder.id} is active. Wait with party_wait until the active lease completes instead of retrying work_claim.`)
+      const anotherWriter = this.findSerialWriteBlocker(run, task)
+      assert(!anotherWriter, 'WRITE_DISPATCH_SERIALIZED', `Strict scope mode serializes write leases; ${anotherWriter?.workOrder.id} is ahead in the queue. Wait with party_wait until it completes instead of retrying work_claim.`)
     }
     const grantedAt = this.clock()
     const lease: TaskLease = {
@@ -1580,6 +1630,7 @@ export class DungeonService {
       (candidate.status === 'ready' || candidate.status === 'running'),
     )
     assert(!busySlotTask, 'SLOT_BUSY', `Slot ${ownerSlot} already owns ${busySlotTask?.workOrder.id ?? 'another active task'}`)
+    this.assertSerialWriteAssignable(run, task)
     const updated = this.append(run, 'dungeon/task-owner-reassigned', {
       taskId,
       previousOwnerSlot: task.ownerSlot,
@@ -2121,16 +2172,17 @@ export class DungeonService {
    * Open a submit protection window for one task: sweeps skip its lease and
    * `submitExecution` tolerates a lease that expires inside the window, so
    * work finished in a long turn is never lost to a concurrent poll-triggered
-   * sweep. The window is anchored at the lease expiry (never earlier than
-   * now) plus a short grace, so a crashed caller cannot pin a lease forever;
-   * callers still release it eagerly in a finally block.
+   * sweep. The window is anchored strictly at `lease.expiresAt + grace` — a
+   * lease already expired beyond the grace can never be re-protected, so a
+   * late `protectSubmit` cannot revive stale work. Callers release eagerly in
+   * a finally block.
    */
   protectSubmit(runId: string, taskId: string): void {
-    const nowMs = Date.parse(this.clock())
     const lease = this.runs.get(runId)?.tasks[taskId]?.activeLease
-    const baseMs = Math.max(nowMs, lease ? Date.parse(lease.expiresAt) : nowMs)
+    if (!lease) return
+    const untilMs = Date.parse(lease.expiresAt) + SUBMIT_PROTECTION_GRACE_MS
     const perRun = this.submitProtections.get(runId) ?? new Map<string, string>()
-    perRun.set(taskId, new Date(baseMs + SUBMIT_PROTECTION_GRACE_MS).toISOString())
+    perRun.set(taskId, new Date(untilMs).toISOString())
     this.submitProtections.set(runId, perRun)
   }
 

@@ -100,7 +100,7 @@ describe('PartyAgentManager', () => {
       version: 2,
       mode: 'continuable',
       provider: 'dungeon-party',
-      label: 'Pyra · dps-1',
+      label: 'Pyra · dps-1 · run',
       agentProvider: 'deepseek',
       agentModel: 'deepseek-chat',
     }))
@@ -114,7 +114,20 @@ describe('PartyAgentManager', () => {
     await manager.ensureMember({ sessionId: 'tank' }, 'run', 'dps-3')
 
     const labels = descriptorAppend.mock.calls.map((call) => (call[1] as { label: string }).label)
-    expect(labels).toEqual(['Lumina · healer', 'Nyx · dps-2', 'Aster · dps-3'])
+    expect(labels).toEqual(['Lumina · healer · run', 'Nyx · dps-2 · run', 'Aster · dps-3 · run'])
+  })
+
+  it('disambiguates same-persona members across runs with a short run tag', async () => {
+    const { service, manager, descriptorAppend } = setup()
+    service.startRun({
+      runId: 'run-20260825-101010-deadbeef', objective: 'Second run', workspaceRoot: '/workspace',
+      workspaceFingerprint: 'v1', tankSessionId: 'tank',
+    })
+
+    await manager.ensureMember({ sessionId: 'tank' }, 'run-20260825-101010-deadbeef', 'dps-1')
+
+    const labels = descriptorAppend.mock.calls.map((call) => (call[1] as { label: string }).label)
+    expect(labels).toContain('Pyra · dps-1 · deadbeef')
   })
 
   it('proactively wakes the healer when validation starts', async () => {
@@ -791,7 +804,7 @@ describe('PartyAgentManager', () => {
     }
   })
 
-  it('excuses unreported toolchain byproducts and reports the exact delta on mismatch', async () => {
+  it('excuses unreported in-scope byproducts and reports the exact delta on mismatch', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dungeon-audit-'))
     mkdirSync(join(root, 'src'))
     writeFileSync(join(root, 'src', 'index.ts'), 'export {}\n')
@@ -804,7 +817,7 @@ describe('PartyAgentManager', () => {
       service.createTask(tank, 'run', {
         id: 'task', runId: 'run', title: 'Task', objective: 'Edit src', inputs: [], constraints: [],
         acceptanceCriteria: [{ id: 'done', description: 'Done', required: true }],
-        readScopes: ['src/**'], writeScopes: ['src/**'], blockedBy: [], expectedArtifacts: [],
+        readScopes: ['src/**'], writeScopes: ['src/**', 'package-lock.json'], blockedBy: [], expectedArtifacts: [],
         priority: 'normal', required: true, version: 1,
       })
       service.changePhase(tank, 'run', 'EXECUTING')
@@ -819,7 +832,7 @@ describe('PartyAgentManager', () => {
       })
 
       // In-scope work plus an unreported lockfile touched by npm install: the
-      // byproduct is excused, the submit must not fail on it.
+      // byproduct is excused from the report, the submit must not fail on it.
       writeFileSync(join(root, 'src', 'one.ts'), 'export const one = 1\n')
       writeFileSync(join(root, 'package-lock.json'), '{"lockfileVersion":3}\n')
       await expect(manager.auditWorkspaceBeforeSubmit(dps, 'run', report(['src/one.ts'])))
@@ -840,6 +853,41 @@ describe('PartyAgentManager', () => {
           code: 'CHANGED_FILES_MISMATCH',
           message: expect.stringContaining('src/ghost.ts'),
         }))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps byproduct exemptions from bypassing write-scope boundaries', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dungeon-audit-'))
+    mkdirSync(join(root, 'src'))
+    writeFileSync(join(root, 'src', 'index.ts'), 'export {}\n')
+    try {
+      const { service, manager } = setup(root)
+      const tank = { sessionId: 'tank' }
+      await manager.ensureMember(tank, 'run', 'healer')
+      await manager.ensureMember(tank, 'run', 'dps-1')
+      service.changePhase(tank, 'run', 'PLANNING')
+      service.createTask(tank, 'run', {
+        id: 'task', runId: 'run', title: 'Task', objective: 'Edit src', inputs: [], constraints: [],
+        acceptanceCriteria: [{ id: 'done', description: 'Done', required: true }],
+        readScopes: ['src/**'], writeScopes: ['src/**'], blockedBy: [], expectedArtifacts: [],
+        priority: 'normal', required: true, version: 1,
+      })
+      service.changePhase(tank, 'run', 'EXECUTING')
+      service.assignTask(tank, 'run', 'task', 'dps-1')
+      const dps = { sessionId: 'run-dps-1-g1' }
+      const lease = service.claimTask(dps, 'run', 'task')
+      await manager.beginLeaseAudit(dps, 'run', 'task', lease.leaseId)
+
+      // The task owns src/** only: a byproduct-shaped change outside every
+      // active scope is still a scope violation, not an excused byproduct.
+      writeFileSync(join(root, 'package-lock.json'), '{"lockfileVersion":3}\n')
+      await expect(manager.auditWorkspaceBeforeSubmit(dps, 'run', {
+        taskId: 'task', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
+        slot: 'dps-1', generation: 1, status: 'completed', summary: 'done',
+        changedFiles: [], evidence: ['done'], commandsRun: [], risks: [], remainingWork: [],
+      })).rejects.toThrowError(expect.objectContaining({ code: 'ACTUAL_WRITE_SCOPE_VIOLATION' }))
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -869,8 +917,9 @@ describe('PartyAgentManager', () => {
       await manager.beginLeaseAudit(dps, 'run', 'task', lease.leaseId)
       writeFileSync(join(root, 'src', 'one.ts'), 'export const one = 1\n')
 
-      // The turn ran long: the lease expired while the DPS was finishing.
-      now += 700_000
+      // The turn ran long: the lease expired inside the submit grace window
+      // while the DPS was finishing.
+      now += 640_000
       const task = await manager.submitExecutionWithAudit(dps, 'run', {
         taskId: 'task', taskVersion: 1, leaseId: lease.leaseId, leaseVersion: lease.version,
         slot: 'dps-1', generation: 1, status: 'completed', summary: 'done',
