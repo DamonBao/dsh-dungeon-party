@@ -102,7 +102,6 @@ function renderOverlay(run: unknown): ReactTestRenderer {
   return create(<DungeonPartyOverlay
     requestAction={async () => true}
     useSessions={overlayUseSessions(run)}
-    useWorkspaces={(() => undefined) as never}
   />)
 }
 
@@ -144,7 +143,7 @@ describe('DungeonPartyOverlay', () => {
   it('stays absent outside dungeon sessions', () => {
     const html = renderToStaticMarkup(<DungeonPartyOverlay requestAction={async () => true} useSessions={(selector) => selector({
       ids: [], byId: {}, current: undefined, phase: 'ready', subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined,
-    })} useWorkspaces={(() => undefined) as never} />)
+    })} />)
     expect(html).toBe('')
   })
 
@@ -159,7 +158,7 @@ describe('DungeonPartyOverlay', () => {
         },
       } as never,
       current: 'tank' as never, phase: 'ready', subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined,
-    })} useWorkspaces={(() => undefined) as never} />)
+    })} />)
     expect(html).toContain('集结队伍')
     expect(html).toContain('永夜堡垒 · 五人突击队')
     expect(html).toContain('守誓者 · Aegis')
@@ -177,7 +176,7 @@ describe('DungeonPartyOverlay', () => {
         projectionValues: { 'dungeon-party': run } } }, current: 'tank', phase: 'ready',
       subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined,
     } as never)) as never
-    const renderer = create(<DungeonPartyOverlay requestAction={async () => true} useSessions={useSessions} useWorkspaces={(() => undefined) as never} />)
+    const renderer = create(<DungeonPartyOverlay requestAction={async () => true} useSessions={useSessions} />)
     const panel = renderer.root.findByProps({ role: 'dialog' })
     expect(panel.props.style).toMatchObject({ width: 348, height: 640, transform: 'translate3d(0px, 0px, 0)' })
     expect(renderer.root.findAll((node) => typeof node.props.className === 'string' && node.props.className.split(' ').includes('dp-member'))).toHaveLength(5)
@@ -241,7 +240,6 @@ describe('DungeonPartyOverlay', () => {
     const renderer = create(<DungeonPartyOverlay
       requestAction={requestAction}
       useSessions={useSessions}
-      useWorkspaces={(() => undefined) as never}
     />)
 
     act(() => renderer.root.findAllByType('button').find((button) => button.children.includes('指挥'))!.props.onClick())
@@ -351,7 +349,6 @@ describe('DungeonPartyOverlay', () => {
     act(() => renderer.update(<DungeonPartyOverlay
       requestAction={async () => true}
       useSessions={overlayUseSessions({ ...run, id: 'run-2' })}
-      useWorkspaces={(() => undefined) as never}
     />))
 
     expect(renderer.root.findAllByProps({ role: 'alertdialog' })).toHaveLength(0)
@@ -366,7 +363,6 @@ describe('DungeonPartyOverlay', () => {
     const renderer = create(<DungeonPartyOverlay
       requestAction={requestAction}
       useSessions={overlayUseSessions(run)}
-      useWorkspaces={(() => undefined) as never}
     />)
     switchTab(renderer, '指挥')
     act(() => renderer.root.findAllByProps({ className: 'dp-button' })[0]!.props.onClick())
@@ -379,7 +375,6 @@ describe('DungeonPartyOverlay', () => {
     act(() => renderer.update(<DungeonPartyOverlay
       requestAction={requestAction}
       useSessions={overlayUseSessions({ ...run, id: 'run-2' })}
-      useWorkspaces={(() => undefined) as never}
     />))
     await act(async () => {
       resolveAction?.(true)

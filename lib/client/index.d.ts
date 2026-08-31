@@ -1,6 +1,6 @@
 import * as react_jsx_runtime0 from "react/jsx-runtime";
 import { Component, ReactNode } from "react";
-import { ClientContext } from "@deepseek-ai/dsh-client-runtime/client";
+import { Context } from "@deepseek-ai/cordis";
 import { PropsRuntime } from "@deepseek-ai/dsh-client-ui-slots";
 
 //#region src/service/dungeon-service.d.ts
@@ -315,7 +315,13 @@ declare class OverlayErrorBoundary extends Component<{
   static getDerivedStateFromError(error: Error): OverlayErrorBoundaryState;
   render(): ReactNode;
 }
-interface DungeonPartyOverlayProps extends PropsRuntime<'shell.overlay'> {
+/**
+ * The overlay consumes only the `useSessions` global standard seat plus its
+ * own inject face. Props are declared as the exact consumed subset (instead of
+ * the full `PropsRuntime` share), so future additions to the global standard
+ * kit never force this component — or its tests — to stub props it ignores.
+ */
+interface DungeonPartyOverlayProps extends Pick<PropsRuntime<'shell.overlay'>, 'useSessions'> {
   requestAction: (instruction: string) => Promise<boolean>;
 }
 declare function DungeonPartyOverlay({
@@ -323,6 +329,6 @@ declare function DungeonPartyOverlay({
   requestAction
 }: DungeonPartyOverlayProps): react_jsx_runtime0.JSX.Element | null;
 declare const inject: string[];
-declare function apply(ctx: ClientContext): void;
+declare function apply(ctx: Context): void;
 //#endregion
 export { DungeonPartyOverlay, MemberMeters, OverlayErrorBoundary, ValidationFindingGroup, apply, formatTime, inject, memberMeters, validationCheckCounts, validationFindingGroups };

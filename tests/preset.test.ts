@@ -58,7 +58,12 @@ describe('dungeon-party agent preset', () => {
     expect(pkg.exports).toHaveProperty('./client')
     expect(pkg.dsh.client).toMatchObject({
       platform: 'web',
-      inject: expect.arrayContaining(['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-ui-layout']),
+      inject: expect.arrayContaining([
+        '@deepseek-ai/dsh-client-ui-layout',
+        '@deepseek-ai/dsh-client-ui-renderer',
+        '@deepseek-ai/dsh-client-ui-session',
+      ]),
     })
+    expect(pkg.dsh.client?.inject).not.toContain('@deepseek-ai/dsh-client-runtime')
   })
 })
