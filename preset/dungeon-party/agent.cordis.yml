@@ -69,8 +69,9 @@
 
 - id: tool-bash
   name: '@deepseek-ai/dsh-tool-bash'
-  config:
-    timeoutMs: 300000
+  # 0.1.2-alpha dropped the plugin-level timeoutMs knob; per-call timeouts are
+  # model-supplied arguments now. Keep the row config-less like the standard
+  # preset so nothing silently strips.
 
 - id: tool-subagent
   name: '@deepseek-ai/dsh-tool-subagent'

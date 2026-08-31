@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi, type Mock } from 'vitest'
+import { SUBAGENT_DESCRIPTOR_VERSION } from '@deepseek-ai/dsh-subagent'
 
 import { PartyAgentManager } from '../src/adapters/party-agent-manager.js'
 import { DungeonService, type DungeonEvent, type WorkOrder } from '../src/service/dungeon-service.js'
@@ -100,7 +101,7 @@ describe('PartyAgentManager', () => {
     await manager.ensureMember({ sessionId: 'tank' }, 'run', 'dps-1')
 
     expect(descriptorAppend).toHaveBeenCalledWith('subagent/descriptor', expect.objectContaining({
-      version: 2,
+      version: SUBAGENT_DESCRIPTOR_VERSION,
       mode: 'continuable',
       provider: 'dungeon-party',
       label: `Pyra · dps-1 · ${runTag('run')}`,

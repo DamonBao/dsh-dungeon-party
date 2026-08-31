@@ -1,7 +1,10 @@
 import { Component, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
-import type { ClientContext, ISessions, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { ISessions, SessionListState } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-session-projection/types'
 import type {
   CommanderRescueTicket,
@@ -533,7 +536,13 @@ function TaskRow({ task }: { task: TaskRecord }) {
   </article>
 }
 
-interface DungeonPartyOverlayProps extends PropsRuntime<'shell.overlay'> {
+/**
+ * The overlay consumes only the `useSessions` global standard seat plus its
+ * own inject face. Props are declared as the exact consumed subset (instead of
+ * the full `PropsRuntime` share), so future additions to the global standard
+ * kit never force this component — or its tests — to stub props it ignores.
+ */
+interface DungeonPartyOverlayProps extends Pick<PropsRuntime<'shell.overlay'>, 'useSessions'> {
   requestAction: (instruction: string) => Promise<boolean>
 }
 

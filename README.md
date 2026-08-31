@@ -202,7 +202,7 @@ The runtime also supports an explicit `childRoute` (`provider` and `model`) for 
 Requirements:
 
 - Node.js 22 or newer
-- A compatible DSH `0.1.x` runtime
+- A compatible DSH `0.1.2-alpha.2` (or newer `0.1.x`) runtime
 
 ```bash
 npm ci
