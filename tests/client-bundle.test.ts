@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 const root = new URL('../', import.meta.url)
 
-describe('DSH 0.1.2-alpha.2 client bundle', () => {
+describe('DSH 0.1.2-rc.1 client bundle', () => {
   it('publishes the module-loader closure artifact expected by dsh web', async () => {
     const pkg = JSON.parse(await readFile(new URL('package.json', root), 'utf8')) as {
       name: string
@@ -14,7 +14,7 @@ describe('DSH 0.1.2-alpha.2 client bundle', () => {
     // The rc-era `dsh-client-runtime` package was retired in 0.1.2-alpha;
     // the client surface now comes from the Session Controller adapter.
     expect(pkg.peerDependencies['@deepseek-ai/dsh-client-runtime']).toBeUndefined()
-    expect(pkg.peerDependencies['@deepseek-ai/dsh-api-session-controller']).toBe('>=0.1.2-alpha.2 <0.2.0')
+    expect(pkg.peerDependencies['@deepseek-ai/dsh-api-session-controller']).toBe('>=0.1.2-rc.1 <0.2.0')
     expect((pkg.exports['./client'] as { default?: string })?.default).toBe('./lib/client.js')
     expect((pkg.exports['.'] as { default?: string })?.default).toBe('./lib/preset-sync.js')
     expect((pkg.exports['./runtime'] as { default?: string })?.default).toBe('./lib/index.js')

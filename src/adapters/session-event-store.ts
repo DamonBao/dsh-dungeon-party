@@ -122,7 +122,7 @@ export class SessionDungeonEventStore implements DungeonEventStore {
   listRunIds(): string[] {
     const runIds = new Set<string>()
     for (const session of this.sessions.list()) {
-      for (const event of session.events) {
+      for (const event of session.snapshotEvents()) {
         if (event.type === 'dungeon/event') runIds.add((event.data as DungeonEvent).runId)
       }
     }
@@ -146,7 +146,7 @@ export class SessionDungeonEventStore implements DungeonEventStore {
       if (cached) return cached
     }
     const events: DungeonEvent[] = []
-    for (const event of session.events) {
+    for (const event of session.snapshotEvents()) {
       if (event.type !== 'dungeon/event') continue
       const dungeonEvent = event.data as DungeonEvent
       if (dungeonEvent.runId === runId) events.push(dungeonEvent)
@@ -166,7 +166,7 @@ export class SessionDungeonEventStore implements DungeonEventStore {
       if (actorSession) return actorSession
     }
     return this.sessions.list().find((session) =>
-      session.events.some((event) => event.type === 'dungeon/event' && event.data.runId === runId),
+      session.snapshotEvents().some((event) => event.type === 'dungeon/event' && event.data.runId === runId),
     )
   }
 }

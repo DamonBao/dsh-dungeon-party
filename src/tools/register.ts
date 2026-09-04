@@ -308,7 +308,7 @@ function normalizePartyMessage(value: Record<string, unknown>): PartyMessageInpu
 }
 
 function currentTurnId(exec: ToolRunContext): string | undefined {
-  const events = exec.agent?.session?.events
+  const events = exec.agent?.session?.snapshotEvents()
   const turn = events
     ? [...events].reverse().find((event) => event.type === 'turn/start')
     : undefined

@@ -35,7 +35,7 @@ function setup(workspaceRoot = '/workspace', clock: () => string = () => '2025-0
   const dispose = vi.fn(async () => undefined)
   const send = vi.fn()
   const descriptorAppend = vi.fn()
-  const childSession = { events: [] as Array<{ type: string }>, append: descriptorAppend }
+  const childSession = { snapshotEvents: () => [] as Array<{ type: string }>, append: descriptorAppend }
   const cancel = vi.fn()
   const whenIdle = vi.fn(async () => undefined)
   const create = vi.fn(async (options: { setup?: (ctx: unknown) => unknown; sessionId: string }) => {
@@ -708,7 +708,7 @@ describe('PartyAgentManager', () => {
       send: vi.fn(),
       cancel: vi.fn(),
       whenIdle: vi.fn(async () => undefined),
-      session: { events: [] as Array<{ type: string }>, append: vi.fn() },
+      session: { snapshotEvents: () => [] as Array<{ type: string }>, append: vi.fn() },
       ctx: { on: on2 },
     }
     const originalGet = agents.get.bind(agents)
