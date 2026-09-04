@@ -44,7 +44,7 @@ describe('SessionDungeonEventStore', () => {
     expect(recreated.listRunIds()).toEqual(['run-1'])
     expect(recreated.loadAfter('run-1', 0)).toEqual(recreated.load('run-1'))
     expect(recreated.loadAfter('run-1', 1)).toEqual([])
-    expect(root.sessions.get('tank' as never)?.events.at(-1)?.type).toBe('dungeon/projection')
+    expect(root.sessions.get('tank' as never)?.snapshotEvents().at(-1)?.type).toBe('dungeon/projection')
   })
 
   it('publishes full projections only on each run own interval', async () => {
@@ -65,7 +65,7 @@ describe('SessionDungeonEventStore', () => {
     })
 
     const session = root.sessions.get('tank' as never)!
-    const projectionCount = (runId: string) => session.events.filter((event) =>
+    const projectionCount = (runId: string) => session.snapshotEvents().filter((event) =>
       event.type === 'dungeon/projection' && (event.data as DungeonRun).id === runId,
     ).length
     const run1 = { id: 'run-1', phase: 'EXECUTING' } as DungeonRun
@@ -98,7 +98,7 @@ describe('SessionDungeonEventStore', () => {
       occurredAt: '2025-01-01T00:00:00.000Z', payload: {},
     })
     const session = root.sessions.get('tank' as never)!
-    const projectionCount = () => session.events.filter((event) =>
+    const projectionCount = () => session.snapshotEvents().filter((event) =>
       event.type === 'dungeon/projection' && (event.data as DungeonRun).id === 'run-1',
     ).length
 
@@ -116,7 +116,7 @@ describe('SessionDungeonEventStore', () => {
     } finally {
       vi.useRealTimers()
     }
-    const projections = session.events.filter((event) =>
+    const projections = session.snapshotEvents().filter((event) =>
       event.type === 'dungeon/projection' && (event.data as DungeonRun).id === 'run-1',
     )
     expect(projections).toHaveLength(2)

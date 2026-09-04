@@ -1056,7 +1056,7 @@ export class PartyAgentManager {
   }
 
   private ensureSubagentDescriptor(agent: Agent, runId: string, slot: ChildSlot): void {
-    if (agent.session.events.some((event) => event.type === 'subagent/descriptor')) return
+    if (agent.session.snapshotEvents().some((event) => event.type === 'subagent/descriptor')) return
     agent.session.append('subagent/descriptor', snapshotSubagentDescriptor({
       mode: 'continuable',
       provider: 'dungeon-party',

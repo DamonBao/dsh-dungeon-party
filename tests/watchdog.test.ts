@@ -27,7 +27,7 @@ function setup(config = {}) {
   }
   const send = vi.fn()
   const tankSend = vi.fn()
-  const childSession = { events: [] as Array<{ type: string }>, append: vi.fn() }
+  const childSession = { snapshotEvents: () => [] as Array<{ type: string }>, append: vi.fn() }
   const makeAgent = (id: string) => ({
     id,
     options: { provider: 'deepseek', model: 'deepseek-chat' },
